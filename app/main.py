@@ -23,13 +23,16 @@ INSTANCE_NAME = os.getenv('INSTANCE_NAME', 'teamcity')
 
 def escape_label_value(value):
     """
-    Escape special characters for Prometheus label values.
-
-    Args:
-        value: Label value to escape
-
+    Escape special characters in a value so it can be used as a Prometheus label.
+    
+    If `value` is `None`, returns an empty string. Otherwise converts `value` to `str`
+    and escapes backslashes (`\`), double quotes (`"`), and newlines.
+    
+    Parameters:
+        value: The value to escape; may be any type (will be converted to `str`).
+    
     Returns:
-        str: Escaped string
+        Escaped string suitable for use as a Prometheus label value.
     """
     if value is None:
         return ""
@@ -38,23 +41,23 @@ def escape_label_value(value):
 
 def parse_teamcity_payload(data):
     """
-    Parse TeamCity webhook payload.
-
-    Extracts required fields from JSON payload:
-    - Build ID and build type ID
-    - Project name and component
-    - Version and branch
-    - Build status
-    - Build URLs
-
-    Args:
-        data (dict): JSON data from TeamCity webhook
-
+    Parse a TeamCity webhook payload into a dictionary of fields suitable for Prometheus metrics.
+    
+    Escapes label-like fields for Prometheus, derives the build type component from the project name, and maps the build status to `status_value` (1 for `SUCCESS`, 0 otherwise).
+    
+    Parameters:
+        data (dict): JSON payload from a TeamCity webhook.
+    
     Returns:
-        dict: Dictionary with parsed data
-
+        dict: Parsed values including keys:
+            - build_type_id, build_type_name, build_type_component, version, branch, build_url,
+              current_build_url, build_id (all escaped for Prometheus labels)
+            - status (raw status string)
+            - status_value (int: 1 for SUCCESS, 0 otherwise)
+            - event_type (original event type)
+    
     Raises:
-        Exception: On parsing error
+        Exception: If parsing fails.
     """
     try:
         event_type = data.get('eventType', '')
@@ -99,21 +102,18 @@ def parse_teamcity_payload(data):
 
 def create_prometheus_metric(parsed_data):
     """
-    Format metric in Prometheus text format.
-
-    Creates teamcity_build_status metric with labels:
-    - build_type_id: Build configuration ID
-    - build_type_component: Project component name
-    - build_type_name: Build configuration name
-    - version: Build version number
-    - branch: Branch name
-    - build_url: Build configuration URL
-
-    Args:
-        parsed_data (dict): Parsed data from TeamCity
-
+    Format a TeamCity build status as a Prometheus text-format metric.
+    
+    The returned text contains TYPE and HELP comments and a single `teamcity_build_status` gauge sample
+    with labels: `build_type_id`, `build_type_component`, `build_type_name`, `version`, `branch`, and `build_url`.
+    
+    Parameters:
+        parsed_data (dict): Parsed TeamCity payload containing these keys:
+            `build_type_id`, `build_type_component`, `build_type_name`, `version`,
+            `branch`, `build_url`, and `status_value`.
+    
     Returns:
-        str: Metric in Prometheus text format
+        str: Prometheus exposition-format metric text for the build status.
     """
     metric_name = "teamcity_build_status"
 
@@ -175,13 +175,12 @@ def send_to_pushgateway(metric_text, parsed_data, job=JOB_NAME, instance=INSTANC
 @app.route('/webhook', methods=['POST'])
 def teamcity_webhook():
     """
-    TeamCity webhook handler.
-
-    Accepts POST request with JSON payload from TeamCity,
-    parses data, creates metric and sends to Pushgateway.
-
+    Handle POST requests from TeamCity webhooks, parse the payload, create a Prometheus metric, and push it to the configured Pushgateway.
+    
+    Validates that the request contains JSON and returns 400 if missing; on successful processing returns 200 with build details and the Pushgateway response status; on processing errors returns 500 with an error message.
+    
     Returns:
-        tuple: JSON response and HTTP status code
+        tuple: (Flask response, int) — JSON response body and HTTP status code.
     """
     try:
         data = request.get_json()
