@@ -57,13 +57,39 @@ docker run -d \
 ### Endpoints
 
 #### POST /webhook
+#### POST /webhook/<template_name>
 
 Main endpoint for receiving webhooks from TeamCity.
+
+The endpoint supports an optional `template_name` parameter in the URL path:
+- `/webhook` - uses default value `empty` for `template_name` label
+- `/webhook/<template_name>` - uses provided value for `template_name` label (e.g., `/webhook/production`, `/webhook/staging`)
 
 **Example request:**
 
 ```bash
+# Basic webhook (template_name will be "empty")
 curl -X POST http://localhost:19092/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventType": "BUILD_FINISHED",
+    "payload": {
+      "id": 12345,
+      "buildTypeId": "Project_BuildConfig",
+      "number": "1.0.0",
+      "status": "SUCCESS",
+      "branchName": "master",
+      "buildType": {
+        "name": "Build Configuration",
+        "projectName": "Department / Team / Project",
+        "webUrl": "https://teamcity.example.com/buildConfiguration/Project_BuildConfig"
+      },
+      "webUrl": "https://teamcity.example.com/build/12345"
+    }
+  }'
+
+# Webhook with template_name
+curl -X POST http://localhost:19092/webhook/production \
   -H "Content-Type: application/json" \
   -d '{
     "eventType": "BUILD_FINISHED",
@@ -92,6 +118,7 @@ curl -X POST http://localhost:19092/webhook \
   "build_type": "Build Configuration",
   "version": "1.0.0",
   "build_status": "SUCCESS",
+  "template_name": "production",
   "pushgateway_response": 200
 }
 ```
@@ -101,9 +128,15 @@ curl -X POST http://localhost:19092/webhook \
 Add to build configuration parameters:
 
 ```properties
+# Basic configuration (template_name will be "empty")
 teamcity.internal.webhooks.enable=True
 teamcity.internal.webhooks.events=BUILD_FINISHED
 teamcity.internal.webhooks.url=http://your-server:19092/webhook
+
+# Configuration with template_name
+teamcity.internal.webhooks.enable=True
+teamcity.internal.webhooks.events=BUILD_FINISHED
+teamcity.internal.webhooks.url=http://your-server:19092/webhook/production
 ```
 
 ## Metric
@@ -130,6 +163,7 @@ The metric contains the following labels:
 | `version` | Build version (build number) | `1.0.0` |
 | `branch` | Branch from which build was triggered | `master` |
 | `build_url` | Build configuration URL in TeamCity | `https://teamcity.example.com/buildConfiguration/Project_BuildConfig` |
+| `template_name` | Template name from webhook URL path | `production`, `staging`, or `empty` (default) |
 | `buildid` | Unique identifier of specific build run (passed via Pushgateway URL) | `12345` |
 | `instance` | Instance name (from environment variable) | `teamcity` |
 | `job` | Job name (from environment variable) | `pushgateway` |
@@ -144,6 +178,7 @@ teamcity_build_status{
   version="1.0.0",
   branch="master",
   build_url="https://teamcity.example.com/buildConfiguration/Project_BuildConfig",
+  template_name="production",
   buildid="12345",
   instance="teamcity",
   job="pushgateway"
@@ -174,6 +209,7 @@ teamcity_build_status{branch="master",
                       build_type_id="Project_BuildConfig", 
                       build_type_name="Build Configuration", 
                       build_url="https://teamcity.example.com/buildConfiguration/Project_BuildConfig", 
+                      template_name="production",
                       buildid="12345", 
                       instance="teamcity", 
                       job="pushgateway", 
