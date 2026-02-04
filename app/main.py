@@ -61,7 +61,7 @@ def parse_teamcity_payload(data):
         payload = data.get('payload', {})
 
         build_type_id = payload.get('buildTypeId', '')
-        build_id = payload.get('id', '')
+        build_id = payload.get('id', 'empty')
         build_type = payload.get('buildType', {})
         build_type_name = build_type.get('name', '')
         build_type_component = build_type.get('projectName', '').split(" / ")[-1]
@@ -174,7 +174,7 @@ def send_to_pushgateway(metric_text, parsed_data, job=JOB_NAME, instance=INSTANC
         raise
 
 
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', defaults={'template_name': None}, methods=['POST'])
 @app.route('/webhook/<template_name>', methods=['POST'])
 def teamcity_webhook(template_name=None):
     """
@@ -205,7 +205,7 @@ def teamcity_webhook(template_name=None):
                 "message": "No JSON data received"
             }), 400
 
-        logger.info(f"Get webhook: {data.get('eventType', 'UNKNOWN')}")
+        logger.info(f"Get webhook for template {template_name}")
 
         parsed_data = parse_teamcity_payload(data)
 
