@@ -184,7 +184,7 @@ def teamcity_webhook(template_name=None):
         tuple: (Flask response, int) — JSON response body and HTTP status code.
     """
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
 
         if not data:
             return jsonify({
@@ -200,7 +200,7 @@ def teamcity_webhook(template_name=None):
         logger.info(f"Metric:\n{metric_text}")
 
         response = send_to_pushgateway(metric_text, parsed_data)
-
+        response.raise_for_status()
         return jsonify({
             "status": "success",
             "message": "Metric go to Pushgateway",
@@ -212,14 +212,14 @@ def teamcity_webhook(template_name=None):
         }), 200
 
     except Exception as e:
-        logger.error(f"Failer wenhook parse: {str(e)}")
+        logger.error(f"Failed webhook parse: {str(e)}")
         return jsonify({
             "status": "error",
             "message": str(e)
         }), 500
 
 if __name__ == '__main__':
-    logger.info(f"Run TeamCity Webhook -> Pushgateway Proxy")
+    logger.info("Run TeamCity Webhook -> Pushgateway Proxy")
     logger.info(f"Listening on port: {PORT}")
     logger.info(f"Pushgateway URL: {PUSHGATEWAY_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
