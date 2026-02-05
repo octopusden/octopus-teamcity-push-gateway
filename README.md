@@ -23,7 +23,7 @@ All parameters are configured via environment variables:
 | Variable | Description | Default Value | Required |
 |----------|-------------|---------------|----------|
 | `PUSHGATEWAY_URL` | Prometheus Pushgateway URL | `http://localhost:9091` | Yes |
-| `PORT` | Port for receiving webhooks | `19092` | No |
+| `PORT` | Port for receiving webhooks | `8000` | No |
 | `JOB_NAME` | Job name for Pushgateway | `pushgateway` | No |
 | `INSTANCE_NAME` | Instance name for Pushgateway | `teamcity` | No |
 
@@ -33,7 +33,7 @@ All parameters are configured via environment variables:
 
 ```bash
 export PUSHGATEWAY_URL="http://pushgateway.example.com:9091"
-export PORT="19092"
+export PORT="8000"
 export JOB_NAME="pushgateway"
 export INSTANCE_NAME="teamcity"
 
@@ -45,10 +45,10 @@ python3 teamcity_to_pushgateway.py
 ```bash
 docker run -d \
   -e PUSHGATEWAY_URL="http://pushgateway:9091" \
-  -e PORT="19092" \
+  -e PORT="8000" \
   -e JOB_NAME="pushgateway" \
   -e INSTANCE_NAME="teamcity" \
-  -p 19092:19092 \
+  -p 8000:8000 \
   teamcity-webhook-proxy
 ```
 
@@ -69,7 +69,7 @@ The endpoint supports an optional `template_name` parameter in the URL path:
 
 ```bash
 # Basic webhook (template_name will be "empty")
-curl -X POST http://localhost:19092/webhook \
+curl -X POST http://localhost:8000/webhook \
   -H "Content-Type: application/json" \
   -d '{
     "eventType": "BUILD_FINISHED",
@@ -89,7 +89,7 @@ curl -X POST http://localhost:19092/webhook \
   }'
 
 # Webhook with template_name
-curl -X POST http://localhost:19092/webhook/production \
+curl -X POST http://localhost:8000/webhook/production \
   -H "Content-Type: application/json" \
   -d '{
     "eventType": "BUILD_FINISHED",
@@ -131,12 +131,12 @@ Add to build configuration parameters:
 # Basic configuration (template_name will be "empty")
 teamcity.internal.webhooks.enable=True
 teamcity.internal.webhooks.events=BUILD_FINISHED
-teamcity.internal.webhooks.url=http://your-server:19092/webhook
+teamcity.internal.webhooks.url=http://your-server:8000/webhook
 
 # Configuration with template_name
 teamcity.internal.webhooks.enable=True
 teamcity.internal.webhooks.events=BUILD_FINISHED
-teamcity.internal.webhooks.url=http://your-server:19092/webhook/production
+teamcity.internal.webhooks.url=http://your-server:8000/webhook/production
 ```
 
 ## Metric
