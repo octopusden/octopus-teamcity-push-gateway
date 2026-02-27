@@ -189,8 +189,9 @@ def send_to_pushgateway(metric_text, parsed_data, job=JOB_NAME, instance=INSTANC
         raise
 
 
-@app.route('/webhook', methods=['POST'])
-def teamcity_webhook():
+@app.route('/webhook', defaults={'template_name': None}, methods=['POST'])
+@app.route('/webhook/<template_name>', methods=['POST'])
+def teamcity_webhook(template_name=None):
     """
     Handle POST requests from TeamCity webhooks, parse the payload, create a Prometheus metric, and push it to the configured Pushgateway.
 
