@@ -38,6 +38,22 @@ def escape_label_value(value):
         return ""
     return str(value).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
 
+def get_property(properties, name, default=None):
+    """
+    Find a property value by name from TeamCity properties list.
+
+    Parameters:
+        properties (list): List of dicts with keys 'name', 'value', 'inherited'.
+        name (str): Property name to search for.
+        default: Value to return if property not found (default: None).
+
+    Returns:
+        str | None: Property value or default.
+    """
+    for prop in properties:
+        if prop["name"] == name:
+            return prop["value"]
+    return default
 
 def parse_teamcity_payload(data):
     """
@@ -70,14 +86,14 @@ def parse_teamcity_payload(data):
         build_type_component = build_type.get('projectName', '').split(" / ")[-1]
         version = payload.get('number', '')
         status = payload.get('status', 'UNKNOWN')
-
         build_url = build_type.get('webUrl', '')
         current_build_url = payload.get('webUrl', '')
 
         branch = payload.get('branchName', 'unknown')
+        properties = payload.get('properties', {}).get('property', [])
+        template_name = get_property(properties, 'MONITORING_TEMPLATE_ID', default='empty')
 
         status_value = 1 if status == 'SUCCESS' else 0
-
         parsed = {
             'build_type_id': escape_label_value(build_type_id),
             'build_type_name': escape_label_value(build_type_name),
@@ -89,7 +105,8 @@ def parse_teamcity_payload(data):
             'status': status,
             'status_value': status_value,
             'build_id': escape_label_value(build_id),
-            'event_type': event_type
+            'event_type': event_type,
+            'template_name': template_name
         }
 
         logger.info(f"Parsed payload: {parsed}")
@@ -100,7 +117,7 @@ def parse_teamcity_payload(data):
         raise
 
 
-def create_prometheus_metric(parsed_data, template_name='empty'):
+def create_prometheus_metric(parsed_data):
     """
     Format a TeamCity build status as a Prometheus text-format metric.
 
@@ -119,7 +136,7 @@ def create_prometheus_metric(parsed_data, template_name='empty'):
 
     metric_text = f"""# TYPE {metric_name} gauge
 # HELP {metric_name} TeamCity build status (1=SUCCESS, 0=FAILURE)
-{metric_name}{{build_type_id="{parsed_data['build_type_id']}",build_type_component="{parsed_data['build_type_component']}",build_type_name="{parsed_data['build_type_name']}",version="{parsed_data['version']}",branch="{parsed_data['branch']}",build_url="{parsed_data['build_url']}",template_name="{escape_label_value(template_name)}"}} {parsed_data['status_value']}
+{metric_name}{{build_type_id="{parsed_data['build_type_id']}",build_type_component="{parsed_data['build_type_component']}",build_type_name="{parsed_data['build_type_name']}",version="{parsed_data['version']}",branch="{parsed_data['branch']}",build_url="{parsed_data['build_url']}",template_name="{parsed_data['template_name']}"}} {parsed_data['status_value']}
 """
 
     return metric_text
@@ -172,9 +189,8 @@ def send_to_pushgateway(metric_text, parsed_data, job=JOB_NAME, instance=INSTANC
         raise
 
 
-@app.route('/webhook', defaults={'template_name': None}, methods=['POST'])
-@app.route('/webhook/<template_name>', methods=['POST'])
-def teamcity_webhook(template_name=None):
+@app.route('/webhook', methods=['POST'])
+def teamcity_webhook():
     """
     Handle POST requests from TeamCity webhooks, parse the payload, create a Prometheus metric, and push it to the configured Pushgateway.
 
@@ -192,11 +208,10 @@ def teamcity_webhook(template_name=None):
                 "message": "No JSON data received"
             }), 400
 
-        logger.info(f"Get webhook for template {template_name}")
 
         parsed_data = parse_teamcity_payload(data)
 
-        metric_text = create_prometheus_metric(parsed_data, template_name)
+        metric_text = create_prometheus_metric(parsed_data)
         logger.info(f"Metric:\n{metric_text}")
 
         response = send_to_pushgateway(metric_text, parsed_data)
@@ -207,7 +222,7 @@ def teamcity_webhook(template_name=None):
             "build_type": parsed_data['build_type_name'],
             "version": parsed_data['version'],
             "build_status": parsed_data['status'],
-            "template_name": template_name,
+            "template_name": parsed_data['template_name'],
             "pushgateway_response": response.status_code
         }), 200
 
