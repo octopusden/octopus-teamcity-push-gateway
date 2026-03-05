@@ -25,7 +25,7 @@ def escape_label_value(value):
     """
     Escape special characters in a value so it can be used as a Prometheus label.
 
-    If `value` is `None`, returns an empty string. Otherwise converts `value` to `str`
+    If `value` is `None`, returns an empty string. Otherwise, converts `value` to `str`
     and escapes backslashes (`\`), double quotes (`"`), and newlines.
 
     Parameters:
@@ -121,22 +121,39 @@ def create_prometheus_metric(parsed_data):
     """
     Format a TeamCity build status as a Prometheus text-format metric.
 
-    The returned text contains TYPE and HELP comments and a single `teamcity_build_status` gauge sample
-    with labels: `build_type_id`, `build_type_component`, `build_type_name`, `version`, `branch`, and `build_url`.
+    The returned text contains TYPE and HELP comments and:
+      - `teamcity_build_status` gauge (1=SUCCESS, 0=FAILURE)
+      - `teamcity_build_first_seen` gauge with unix timestamp of when this build_id
+        first appeared (set at push time, stored permanently in Pushgateway per buildid)
 
     Parameters:
         parsed_data (dict): Parsed TeamCity payload containing these keys:
             `build_type_id`, `build_type_component`, `build_type_name`, `version`,
-            `branch`, `build_url`, and `status_value`.
+            `branch`, `build_url`, `template_name`, and `status_value`.
 
     Returns:
-        str: Prometheus exposition-format metric text for the build status.
+        str: Prometheus exposition-format metric text.
     """
     metric_name = "teamcity_build_status"
+    first_seen_metric = "teamcity_build_first_seen"
+    first_seen_ts = int(datetime.now().timestamp())
+
+    labels = (
+        f'build_type_id="{parsed_data["build_type_id"]}",'
+        f'build_type_component="{parsed_data["build_type_component"]}",'
+        f'build_type_name="{parsed_data["build_type_name"]}",'
+        f'version="{parsed_data["version"]}",'
+        f'branch="{parsed_data["branch"]}",'
+        f'build_url="{parsed_data["build_url"]}",'
+        f'template_name="{parsed_data["template_name"]}"'
+    )
 
     metric_text = f"""# TYPE {metric_name} gauge
 # HELP {metric_name} TeamCity build status (1=SUCCESS, 0=FAILURE)
-{metric_name}{{build_type_id="{parsed_data['build_type_id']}",build_type_component="{parsed_data['build_type_component']}",build_type_name="{parsed_data['build_type_name']}",version="{parsed_data['version']}",branch="{parsed_data['branch']}",build_url="{parsed_data['build_url']}",template_name="{parsed_data['template_name']}"}} {parsed_data['status_value']}
+{metric_name}{{{labels}}} {parsed_data['status_value']}
+# TYPE {first_seen_metric} gauge
+# HELP {first_seen_metric} Unix timestamp when this build_id first appeared
+{first_seen_metric}{{{labels}}} {first_seen_ts}
 """
 
     return metric_text
