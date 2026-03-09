@@ -50,9 +50,13 @@ def get_property(properties, name, default=None):
     Returns:
         The matched property's `value`, or `default` if not found.
     """
+    if isinstance(properties, dict):
+        properties = [properties]
+    if not isinstance(properties, list):
+        return default
     for prop in properties:
-        if prop["name"] == name:
-            return prop["value"]
+        if isinstance(prop, dict) and prop.get("name") == name:
+            return prop.get("value", default)
     return default
 
 def parse_teamcity_payload(data):
@@ -91,8 +95,9 @@ def parse_teamcity_payload(data):
 
         branch = payload.get('branchName', 'unknown')
         properties = payload.get('properties', {}).get('property', [])
-        template_name = get_property(properties, 'MONITORING_TEMPLATE_ID', default='empty')
-
+        template_name = escape_label_value(
+            get_property(properties, 'MONITORING_TEMPLATE_ID', default='empty')
+        )
         status_value = 1 if status == 'SUCCESS' else 0
         parsed = {
             'build_type_id': escape_label_value(build_type_id),
