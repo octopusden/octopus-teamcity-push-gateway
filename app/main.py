@@ -134,12 +134,22 @@ def create_prometheus_metric(parsed_data):
     """
     metric_name = "teamcity_build_status"
 
-    metric_text = f"""# TYPE {metric_name} gauge
-# HELP {metric_name} TeamCity build status (1=SUCCESS, 0=FAILURE)
-{metric_name}{{build_type_id="{parsed_data['build_type_id']}",build_type_component="{parsed_data['build_type_component']}",build_type_name="{parsed_data['build_type_name']}",version="{parsed_data['version']}",branch="{parsed_data['branch']}",build_url="{parsed_data['build_url']}",template_name="{parsed_data['template_name']}"}} {parsed_data['status_value']}
-"""
+    labels = (
+        f'build_type_id="{parsed_data["build_type_id"]}",'
+        f'build_type_component="{parsed_data["build_type_component"]}",'
+        f'build_type_name="{parsed_data["build_type_name"]}",'
+        f'version="{parsed_data["version"]}",'
+        f'branch="{parsed_data["branch"]}",'
+        f'build_url="{parsed_data["build_url"]}",'
+        f'template_name="{parsed_data["template_name"]}"'
+    )
 
-    return metric_text
+    return (
+        f"# TYPE {metric_name} gauge\n"
+        f"# HELP {metric_name} TeamCity build status (1=SUCCESS, 0=FAILURE)\n"
+        f"{metric_name}{{{labels}}} {parsed_data['status_value']}\n"
+    )
+
 
 
 def send_to_pushgateway(metric_text, parsed_data, job=JOB_NAME, instance=INSTANCE_NAME):
