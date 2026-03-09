@@ -40,15 +40,15 @@ def escape_label_value(value):
 
 def get_property(properties, name, default=None):
     """
-    Find a property value by name from TeamCity properties list.
-
+    Return the value of the first property with the given name from a list of TeamCity property dicts.
+    
     Parameters:
-        properties (list): List of dicts with keys 'name', 'value', 'inherited'.
+        properties (list[dict]): Iterable of property dictionaries containing at least the keys 'name' and 'value'.
         name (str): Property name to search for.
-        default: Value to return if property not found (default: None).
-
+        default: Value to return if no property with the given name is found.
+    
     Returns:
-        str | None: Property value or default.
+        The matched property's `value`, or `default` if not found.
     """
     for prop in properties:
         if prop["name"] == name:
@@ -119,16 +119,13 @@ def parse_teamcity_payload(data):
 
 def create_prometheus_metric(parsed_data):
     """
-    Format a TeamCity build status as a Prometheus text-format metric.
-
-    The returned text contains TYPE and HELP comments and a single `teamcity_build_status` gauge sample
-    with labels: `build_type_id`, `build_type_component`, `build_type_name`, `version`, `branch`, and `build_url`.
-
+    Format a TeamCity build status into Prometheus exposition-format text.
+    
     Parameters:
-        parsed_data (dict): Parsed TeamCity payload containing these keys:
+        parsed_data (dict): Parsed TeamCity payload containing keys:
             `build_type_id`, `build_type_component`, `build_type_name`, `version`,
-            `branch`, `build_url`, and `status_value`.
-
+            `branch`, `build_url`, `template_name`, and `status_value`.
+    
     Returns:
         str: Prometheus exposition-format metric text for the build status.
     """
@@ -203,12 +200,13 @@ def send_to_pushgateway(metric_text, parsed_data, job=JOB_NAME, instance=INSTANC
 @app.route('/webhook/<template_name>', methods=['POST'])
 def teamcity_webhook(template_name=None):
     """
-    Handle POST requests from TeamCity webhooks, parse the payload, create a Prometheus metric, and push it to the configured Pushgateway.
-
-    Validates that the request contains JSON and returns 400 if missing; on successful processing returns 200 with build details and the Pushgateway response status; on processing errors returns 500 with an error message.
-
+    Handle TeamCity webhook POSTs: parse the JSON payload, create a Prometheus metric, push it to the configured Pushgateway, and return a JSON result.
+    
+    Parameters:
+        template_name (str | None): Optional template name extracted from the request path (may be None).
+    
     Returns:
-        tuple: (Flask response, int) — JSON response body and HTTP status code.
+        tuple: (response_body, status_code) — JSON object with either success details (including build type, version, status, template_name, and Pushgateway response code) or an error message, and the corresponding HTTP status code (200 on success, 400 on bad request, 500 on processing error).
     """
     try:
         data = request.get_json(silent=True)
