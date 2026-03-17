@@ -109,7 +109,6 @@ def build_line_protocol(parsed_data: dict) -> str:
         f"template_name={escape_tag(parsed_data['template_name'])}",
     ])
 
-    # string fields must be wrapped in quotes; numeric — без кавычек
     fields = ",".join([
         f"status_value={parsed_data['status_value']}i",
         f'status="{parsed_data["status"]}"',
