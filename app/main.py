@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 import requests
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,50 +15,31 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-PUSHGATEWAY_URL = os.getenv('PUSHGATEWAY_URL', 'http://localhost:9091')
-PORT = int(os.getenv('PORT', '8000'))
-JOB_NAME = os.getenv('JOB_NAME', 'pushgateway')
-INSTANCE_NAME = os.getenv('INSTANCE_NAME', 'teamcity')
+INFLUXDB_URL      = os.getenv('INFLUXDB_URL', 'http://localhost:8086')
+INFLUXDB_TOKEN    = os.getenv('INFLUXDB_TOKEN', '')
+INFLUXDB_ORG      = os.getenv('INFLUXDB_ORG', 'my-org')
+INFLUXDB_BUCKET   = os.getenv('INFLUXDB_BUCKET', 'teamcity')
+PORT              = int(os.getenv('PORT', '8000'))
 
 
 def escape_label_value(value):
-    """
-    Escape special characters in a value so it can be used as a Prometheus label.
-
-    If `value` is `None`, returns an empty string. Otherwise converts `value` to `str`
-    and escapes backslashes (`\`), double quotes (`"`), and newlines.
-
-    Parameters:
-        value: The value to escape; may be any type (will be converted to `str`).
-
-    Returns:
-        str: Escaped string
-    """
     if value is None:
         return ""
     return str(value).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
 
 
+def get_property(properties, name, default=None):
+    if isinstance(properties, dict):
+        properties = [properties]
+    if not isinstance(properties, list):
+        return default
+    for prop in properties:
+        if isinstance(prop, dict) and prop.get("name") == name:
+            return prop.get("value", default)
+    return default
+
+
 def parse_teamcity_payload(data):
-    """
-    Parse a TeamCity webhook payload into a dictionary of fields suitable for Prometheus metrics.
-
-    Escapes label-like fields for Prometheus, derives the build type component from the project name, and maps the build status to `status_value` (1 for `SUCCESS`, 0 otherwise).
-
-    Parameters:
-        data (dict): JSON payload from a TeamCity webhook.
-
-    Returns:
-        dict: Parsed values including keys:
-            - build_type_id, build_type_name, build_type_component, version, branch, build_url,
-              current_build_url, build_id (all escaped for Prometheus labels)
-            - status (raw status string)
-            - status_value (int: 1 for SUCCESS, 0 otherwise)
-            - event_type (original event type)
-
-    Raises:
-        Exception: If parsing fails.
-    """
     try:
         event_type = data.get('eventType', '')
         payload = data.get('payload', {})
@@ -70,12 +51,13 @@ def parse_teamcity_payload(data):
         build_type_component = build_type.get('projectName', '').split(" / ")[-1]
         version = payload.get('number', '')
         status = payload.get('status', 'UNKNOWN')
-
         build_url = build_type.get('webUrl', '')
         current_build_url = payload.get('webUrl', '')
-
         branch = payload.get('branchName', 'unknown')
-
+        properties = payload.get('properties', {}).get('property', [])
+        template_name = escape_label_value(
+            get_property(properties, 'MONITORING_TEMPLATE_ID', default='empty')
+        )
         status_value = 1 if status == 'SUCCESS' else 0
 
         parsed = {
@@ -89,7 +71,8 @@ def parse_teamcity_payload(data):
             'status': status,
             'status_value': status_value,
             'build_id': escape_label_value(build_id),
-            'event_type': event_type
+            'event_type': event_type,
+            'template_name': template_name
         }
 
         logger.info(f"Parsed payload: {parsed}")
@@ -100,126 +83,106 @@ def parse_teamcity_payload(data):
         raise
 
 
-def create_prometheus_metric(parsed_data, template_name='empty'):
+def escape_tag(value: str) -> str:
+    """Escape spaces, commas, equals in tag keys/values (InfluxDB line protocol)."""
+    return str(value).replace(',', '\\,').replace('=', '\\=').replace(' ', '\\ ')
+
+
+def build_line_protocol(parsed_data: dict) -> str:
     """
-    Format a TeamCity build status as a Prometheus text-format metric.
+    Build an InfluxDB line protocol string from parsed TeamCity data.
 
-    The returned text contains TYPE and HELP comments and a single `teamcity_build_status` gauge sample
-    with labels: `build_type_id`, `build_type_component`, `build_type_name`, `version`, `branch`, and `build_url`.
+    Tags (indexed, used in filters):
+        build_type_id, build_type_component, build_type_name, branch, template_name
 
-    Parameters:
-        parsed_data (dict): Parsed TeamCity payload containing these keys:
-            `build_type_id`, `build_type_component`, `build_type_name`, `version`,
-            `branch`, `build_url`, and `status_value`.
-
-    Returns:
-        str: Prometheus exposition-format metric text for the build status.
+    Fields (numeric/string values):
+        status_value (int), status (string), version (string),
+        build_url (string), build_id (string)
     """
-    metric_name = "teamcity_build_status"
+    measurement = "teamcity_build_status"
 
-    metric_text = f"""# TYPE {metric_name} gauge
-# HELP {metric_name} TeamCity build status (1=SUCCESS, 0=FAILURE)
-{metric_name}{{build_type_id="{parsed_data['build_type_id']}",build_type_component="{parsed_data['build_type_component']}",build_type_name="{parsed_data['build_type_name']}",version="{parsed_data['version']}",branch="{parsed_data['branch']}",build_url="{parsed_data['build_url']}",template_name="{escape_label_value(template_name)}"}} {parsed_data['status_value']}
-"""
+    tags = ",".join([
+        f"build_type_id={escape_tag(parsed_data['build_type_id'])}",
+        f"build_type_component={escape_tag(parsed_data['build_type_component'])}",
+        f"build_type_name={escape_tag(parsed_data['build_type_name'])}",
+        f"branch={escape_tag(parsed_data['branch'])}",
+        f"template_name={escape_tag(parsed_data['template_name'])}",
+    ])
 
-    return metric_text
+    fields = ",".join([
+        f"status_value={parsed_data['status_value']}i",
+        f'status="{parsed_data["status"]}"',
+        f'version="{escape_tag(parsed_data["version"])}"',
+        f'build_url="{parsed_data["build_url"]}"',
+        f'build_id="{parsed_data["build_id"]}"',
+    ])
+
+    timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
+
+    return f"{measurement},{tags} {fields} {timestamp_ns}"
 
 
-def send_to_pushgateway(metric_text, parsed_data, job=JOB_NAME, instance=INSTANCE_NAME):
+def send_to_influxdb(line: str) -> requests.Response:
     """
-    Send metric to Prometheus Pushgateway.
-
-    URL format:
-    /metrics/job/{job}/instance/{instance}/buildid/{build_id}
-
-    Args:
-        metric_text (str): Metric in Prometheus text format
-        parsed_data (dict): Parsed data with build_id
-        job (str): Job name for Pushgateway
-        instance (str): Instance name for Pushgateway
-
-    Returns:
-        requests.Response: Response from Pushgateway
-
-    Raises:
-        requests.exceptions.RequestException: On HTTP request error
+    POST a single line protocol record to InfluxDB v2 /api/v2/write.
     """
+    url = f"{INFLUXDB_URL}/api/v2/write"
+    params = {
+        "org":       INFLUXDB_ORG,
+        "bucket":    INFLUXDB_BUCKET,
+        "precision": "ns",
+    }
+    headers = {
+        "Authorization": f"Token {INFLUXDB_TOKEN}",
+        "Content-Type":  "text/plain; charset=utf-8",
+    }
+
     try:
-        from urllib.parse import quote
-
-        build_id = quote(parsed_data['build_id'], safe='')
-
-        url = f"{PUSHGATEWAY_URL}/metrics/job/{job}/instance/{instance}/buildid/{build_id}"
-
-        headers = {
-            'Content-Type': 'text/plain; charset=utf-8'
-        }
-
         response = requests.post(
             url,
-            data=metric_text.encode('utf-8'),
+            params=params,
             headers=headers,
-            timeout=5
+            data=line.encode("utf-8"),
+            timeout=5,
         )
-
-        logger.info(f"Metrics go to Pushgateway: {url}")
-        logger.info(f"Response: {response.status_code}")
-
+        logger.info(f"InfluxDB write → {response.status_code}  line: {line}")
         return response
-
     except requests.exceptions.RequestException as e:
-        logger.error(f"Failed push metrics into Pushgateway: {str(e)}")
+        logger.error(f"Failed to write to InfluxDB: {e}")
         raise
 
 
 @app.route('/webhook', defaults={'template_name': None}, methods=['POST'])
 @app.route('/webhook/<template_name>', methods=['POST'])
 def teamcity_webhook(template_name=None):
-    """
-    Handle POST requests from TeamCity webhooks, parse the payload, create a Prometheus metric, and push it to the configured Pushgateway.
-
-    Validates that the request contains JSON and returns 400 if missing; on successful processing returns 200 with build details and the Pushgateway response status; on processing errors returns 500 with an error message.
-
-    Returns:
-        tuple: (Flask response, int) — JSON response body and HTTP status code.
-    """
     try:
         data = request.get_json(silent=True)
-
         if not data:
-            return jsonify({
-                "status": "error",
-                "message": "No JSON data received"
-            }), 400
-
-        logger.info(f"Get webhook for template {template_name}")
+            return jsonify({"status": "error", "message": "No JSON data received"}), 400
 
         parsed_data = parse_teamcity_payload(data)
+        line = build_line_protocol(parsed_data)
 
-        metric_text = create_prometheus_metric(parsed_data, template_name)
-        logger.info(f"Metric:\n{metric_text}")
-
-        response = send_to_pushgateway(metric_text, parsed_data)
+        response = send_to_influxdb(line)
         response.raise_for_status()
+
         return jsonify({
             "status": "success",
-            "message": "Metric go to Pushgateway",
-            "build_type": parsed_data['build_type_name'],
-            "version": parsed_data['version'],
-            "build_status": parsed_data['status'],
-            "template_name": template_name,
-            "pushgateway_response": response.status_code
+            "message": "Metric written to InfluxDB",
+            "build_type":      parsed_data['build_type_name'],
+            "version":         parsed_data['version'],
+            "build_status":    parsed_data['status'],
+            "template_name":   parsed_data['template_name'],
+            "influxdb_response": response.status_code,
         }), 200
 
     except Exception as e:
-        logger.error(f"Failed webhook parse: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        logger.error(f"Failed webhook processing: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 if __name__ == '__main__':
-    logger.info("Run TeamCity Webhook -> Pushgateway Proxy")
+    logger.info("Run TeamCity Webhook → InfluxDB")
     logger.info(f"Listening on port: {PORT}")
-    logger.info(f"Pushgateway URL: {PUSHGATEWAY_URL}")
+    logger.info(f"InfluxDB URL: {INFLUXDB_URL} / org: {INFLUXDB_ORG} / bucket: {INFLUXDB_BUCKET}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
