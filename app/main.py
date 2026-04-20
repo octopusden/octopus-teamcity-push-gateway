@@ -49,6 +49,8 @@ def parse_teamcity_payload(data):
         build_type = payload.get('buildType', {})
         build_type_name = build_type.get('name', '')
         build_type_component = build_type.get('projectName', '').split(" / ")[-1]
+        project_id = build_type.get('projectId', '')
+        default_branch = str(payload.get('defaultBranch', False)).lower()
         version = payload.get('number', '')
         status = payload.get('status', 'UNKNOWN')
         build_url = build_type.get('webUrl', '')
@@ -72,7 +74,9 @@ def parse_teamcity_payload(data):
             'status_value': status_value,
             'build_id': escape_label_value(build_id),
             'event_type': event_type,
-            'template_name': template_name
+            'template_name': template_name,
+            'project_id': escape_label_value(project_id),
+            'default_branch': default_branch
         }
 
         logger.info(f"Parsed payload: {parsed}")
@@ -107,6 +111,8 @@ def build_line_protocol(parsed_data: dict) -> str:
         f"build_type_name={escape_tag(parsed_data['build_type_name'])}",
         f"branch={escape_tag(parsed_data['branch'])}",
         f"template_name={escape_tag(parsed_data['template_name'])}",
+        f"project_id={escape_tag(parsed_data['project_id'])}",
+        f"default_branch={escape_tag(parsed_data['default_branch'])}",
     ])
 
     fields = ",".join([
