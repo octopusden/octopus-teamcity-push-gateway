@@ -50,7 +50,12 @@ def parse_teamcity_payload(data):
         build_type_name = build_type.get('name', '')
         build_type_component = build_type.get('projectName', '').split(" / ")[-1]
         project_id = build_type.get('projectId', '')
-        default_branch = str(payload.get('defaultBranch', False)).lower()
+        default_branch_raw = payload.get('defaultBranch')
++        default_branch = (
++            str(default_branch_raw).lower()
++            if default_branch_raw not in (None, "")
++            else "unknown"
++        )
         version = payload.get('number', '')
         status = payload.get('status', 'UNKNOWN')
         build_url = build_type.get('webUrl', '')
