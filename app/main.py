@@ -89,7 +89,7 @@ def setup_logging():
     """
     log_format = os.environ.get("LOG_FORMAT", "json").lower()
     if log_format not in ("json", "text"):
-        raise EnvironmentError("LOG_FORMAT must be json or text")
+        raise ValueError("LOG_FORMAT must be json or text")
 
     setup = setup_json_logging if log_format == "json" else setup_text_logging
     setup(
