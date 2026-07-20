@@ -4,14 +4,111 @@
 from flask import Flask, request, jsonify
 import requests
 import logging
+import structlog
+from oc_logging import setup_json_logging, setup_text_logging
+import json
 import os
 from datetime import datetime, timezone
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+
+def get_log_level():
+    """
+    Resolve the logging level name from the LOG_LEVEL environment variable.
+
+    LOG_LEVEL may be a level name (e.g. "debug", "WARNING") or a numeric string
+    (10/20/30/40/50). Unset or unrecognized values resolve to "info".
+
+    Returns:
+        str: A level name accepted by oc_logging ("debug", "info", "warning", "error", "critical").
+    """
+    lvl = os.environ.get("LOG_LEVEL")
+    if not lvl:
+        return "info"
+
+    if lvl.isdigit():
+        name = logging.getLevelName(int(lvl))
+    else:
+        name = lvl.upper()
+
+    if name not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        return "info"
+    return name.lower()
+
+
+# The stdlib logger name our structlog records are emitted under. Passing it explicitly to
+# structlog.get_logger() pins it, instead of letting the factory derive it from the call site --
+# ForeignLogFormatter relies on it to tell our (already rendered) records from foreign ones.
+APP_LOGGER_NAME = "teamcity-push-gateway"
+
+
+class ForeignLogFormatter(logging.Formatter):
+    """Render records from third-party stdlib loggers in the same shape as our own.
+
+    oc-logging sets the root format to "%(message)s" (structlog renders our records
+    itself), so anything logged through plain stdlib logging -- werkzeug access logs,
+    urllib3 -- is printed bare, with no level and no timestamp. Log collectors then
+    merge those lines into the preceding structlog event, which stops being valid JSON
+    and lands in Kibana unparsed. Wrapping them keeps every line a self-contained record.
+
+    Records emitted by this module already went through structlog and are passed
+    through untouched.
+    """
+
+    def __init__(self, json_output):
+        super().__init__()
+        self.json_output = json_output
+
+    def format(self, record):
+        if record.name == APP_LOGGER_NAME:
+            return record.getMessage()
+
+        message = record.getMessage()
+        if record.exc_info:
+            message = f"{message}\n{self.formatException(record.exc_info)}"
+        timestamp = datetime.fromtimestamp(record.created, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        if self.json_output:
+            # json.dumps escapes newlines, so a traceback stays on a single line.
+            return json.dumps({
+                "level": record.levelname.lower(),
+                "message": message,
+                "timestamp": timestamp,
+                "func_name": record.funcName,
+                "logger": record.name,
+            })
+        return f"[{timestamp}] [{record.levelname}] {message} func_name={record.funcName} logger={record.name}"
+
+
+def setup_logging():
+    """
+    Configure structlog via oc-logging and return the application logger.
+
+    LOG_FORMAT selects the renderer: "json" (default) or "text". The calling
+    function name is added to every record. Third-party stdlib loggers (werkzeug,
+    urllib3) are rendered in the same format, see ForeignLogFormatter.
+    """
+    log_format = os.environ.get("LOG_FORMAT", "json").lower()
+    if log_format not in ("json", "text"):
+        raise EnvironmentError("LOG_FORMAT must be json or text")
+
+    setup = setup_json_logging if log_format == "json" else setup_text_logging
+    setup(
+        get_log_level(),
+        custom_processors=[
+            structlog.processors.CallsiteParameterAdder(
+                [structlog.processors.CallsiteParameter.FUNC_NAME]
+            )
+        ],
+    )
+
+    formatter = ForeignLogFormatter(log_format == "json")
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(formatter)
+
+    return structlog.get_logger(APP_LOGGER_NAME)
+
+
+logger = setup_logging()
 
 app = Flask(__name__)
 
