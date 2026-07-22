@@ -26,6 +26,27 @@ All parameters are configured via environment variables:
 | `PORT` | Port for receiving webhooks | `8000` | No |
 | `JOB_NAME` | Job name for Pushgateway | `pushgateway` | No |
 | `INSTANCE_NAME` | Instance name for Pushgateway | `teamcity` | No |
+| `LOG_LEVEL` | Logging level (name or number: DEBUG/10 … CRITICAL/50) | `INFO` | No |
+| `LOG_FORMAT` | Logging output format: `json` or `text` | `json` | No |
+
+### Logging
+
+Logging is configured through [octopus-oc-corelibs-logging](https://github.com/octopusden/octopus-oc-corelibs-logging)
+(`oc-logging`, structlog-based). Every record carries the level, the message, a UTC timestamp
+and the calling function name:
+
+```json
+{"level": "info", "message": "InfluxDB write → 204", "timestamp": "2025-10-09 15:05:43", "func_name": "send_to_influxdb"}
+```
+
+Records coming from third-party libraries (`werkzeug` access logs, `urllib3`) are rendered in the
+same one-line format and carry an extra `logger` field with the library logger name. This matters
+for log collectors: a bare, multi-line library message gets merged into the preceding record and
+breaks JSON parsing on ingest.
+
+```json
+{"level": "info", "message": "127.0.0.1 - - [09/Oct/2025 15:05:43] \"POST /webhook HTTP/1.1\" 200 -", "timestamp": "2025-10-09 15:05:43", "func_name": "_log", "logger": "werkzeug"}
+```
 
 ### Configuration Examples
 
