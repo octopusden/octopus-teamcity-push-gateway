@@ -136,6 +136,29 @@ def get_property(properties, name, default=None):
     return default
 
 
+# TeamCity timestamps look like "20260125T070716+0000".
+TC_DATE_FORMAT = "%Y%m%dT%H%M%S%z"
+
+
+def parse_tc_date(value):
+    """Parse a TeamCity timestamp (e.g. '20260125T070716+0000') to an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, TC_DATE_FORMAT)
+    except (ValueError, TypeError):
+        return None
+
+
+def compute_duration_seconds(payload):
+    """Overall build duration in seconds = finishDate - startDate. None if either is missing/unparsable."""
+    start = parse_tc_date(payload.get('startDate'))
+    finish = parse_tc_date(payload.get('finishDate'))
+    if start is None or finish is None:
+        return None
+    return (finish - start).total_seconds()
+
+
 def parse_teamcity_payload(data):
     try:
         event_type = data.get('eventType', '')
@@ -163,6 +186,7 @@ def parse_teamcity_payload(data):
             get_property(properties, 'MONITORING_TEMPLATE_ID', default='empty')
         )
         status_value = 1 if status == 'SUCCESS' else 0
+        duration_seconds = compute_duration_seconds(payload)
 
         parsed = {
             'build_type_id': escape_label_value(build_type_id),
@@ -178,7 +202,8 @@ def parse_teamcity_payload(data):
             'event_type': event_type,
             'template_name': template_name,
             'project_id': escape_label_value(project_id),
-            'default_branch': default_branch
+            'default_branch': default_branch,
+            'duration_seconds': duration_seconds
         }
 
         logger.info(f"Parsed payload: {parsed}")
@@ -203,7 +228,8 @@ def build_line_protocol(parsed_data: dict) -> str:
 
     Fields (numeric/string values):
         status_value (int), status (string), version (string),
-        build_url (string), build_id (string)
+        build_url (string), build_id (string),
+        duration_seconds (float, only when finishDate-startDate is available)
     """
     measurement = "teamcity_build_status"
 
@@ -217,13 +243,17 @@ def build_line_protocol(parsed_data: dict) -> str:
         f"default_branch={escape_tag(parsed_data['default_branch'])}",
     ])
 
-    fields = ",".join([
+    field_parts = [
         f"status_value={parsed_data['status_value']}i",
         f'status="{parsed_data["status"]}"',
         f'version="{escape_tag(parsed_data["version"])}"',
         f'build_url="{parsed_data["build_url"]}"',
         f'build_id="{parsed_data["build_id"]}"',
-    ])
+    ]
+    # duration_seconds is optional: canceled/never-started builds have no start/finish pair.
+    if parsed_data.get('duration_seconds') is not None:
+        field_parts.append(f"duration_seconds={float(parsed_data['duration_seconds'])}")
+    fields = ",".join(field_parts)
 
     timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
 

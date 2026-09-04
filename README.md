@@ -6,6 +6,12 @@ Service for receiving webhooks from TeamCity and sending metrics to Prometheus P
 
 The service listens for incoming HTTP POST requests from TeamCity, parses build status data, and sends metrics to Prometheus Pushgateway. This allows tracking TeamCity build statuses in Prometheus and Grafana.
 
+## Changes
+
+- **Build duration**: the TeamCity path now writes a `duration_seconds` field
+  (`finishDate - startDate`) to `teamcity_build_status`. Parsed via `parse_tc_date` /
+  `compute_duration_seconds`; omitted for canceled/never-started builds (no start/finish pair).
+
 ## Installation
 
 ### Dependencies
@@ -167,6 +173,10 @@ teamcity.internal.webhooks.url=http://your-server:8000/webhook/production
 **Type:** Gauge
 
 **Description:** TeamCity build status
+
+**Note:** as of the timing change, this measurement also carries a `duration_seconds` field
+(float) = `finishDate - startDate`, written when both timestamps are present in the webhook
+payload.
 
 **Values:**
 - `1` - Build successful (SUCCESS)
