@@ -112,11 +112,13 @@ logger = setup_logging()
 
 app = Flask(__name__)
 
-INFLUXDB_URL      = os.getenv('INFLUXDB_URL', 'http://localhost:8086')
-INFLUXDB_TOKEN    = os.getenv('INFLUXDB_TOKEN', '')
-INFLUXDB_ORG      = os.getenv('INFLUXDB_ORG', 'my-org')
-INFLUXDB_BUCKET   = os.getenv('INFLUXDB_BUCKET', 'teamcity')
-PORT              = int(os.getenv('PORT', '8000'))
+INFLUXDB_URL           = os.getenv('INFLUXDB_URL', 'http://localhost:8086')
+INFLUXDB_TOKEN         = os.getenv('INFLUXDB_TOKEN', '')
+INFLUXDB_ORG           = os.getenv('INFLUXDB_ORG', 'my-org')
+INFLUXDB_BUCKET        = os.getenv('INFLUXDB_BUCKET', 'teamcity')
+# Jenkins builds go to their own bucket (must exist and be writable by INFLUXDB_TOKEN).
+INFLUXDB_JENKINS_BUCKET = os.getenv('INFLUXDB_JENKINS_BUCKET', 'jenkins')
+PORT                   = int(os.getenv('PORT', '8000'))
 
 
 def escape_label_value(value):
@@ -260,14 +262,18 @@ def build_line_protocol(parsed_data: dict) -> str:
     return f"{measurement},{tags} {fields} {timestamp_ns}"
 
 
-def send_to_influxdb(line: str) -> requests.Response:
+def send_to_influxdb(line: str, bucket: str = None) -> requests.Response:
     """
     POST a single line protocol record to InfluxDB v2 /api/v2/write.
+
+    :param bucket: target bucket; defaults to INFLUXDB_BUCKET (TeamCity). The Jenkins
+                   endpoint passes INFLUXDB_JENKINS_BUCKET.
     """
+    target_bucket = bucket or INFLUXDB_BUCKET
     url = f"{INFLUXDB_URL}/api/v2/write"
     params = {
         "org":       INFLUXDB_ORG,
-        "bucket":    INFLUXDB_BUCKET,
+        "bucket":    target_bucket,
         "precision": "ns",
     }
     headers = {
@@ -283,11 +289,76 @@ def send_to_influxdb(line: str) -> requests.Response:
             data=line.encode("utf-8"),
             timeout=5,
         )
-        logger.info(f"InfluxDB write → {response.status_code}  line: {line}")
+        logger.info(f"InfluxDB write → {response.status_code}  bucket: {target_bucket}  line: {line}")
         return response
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to write to InfluxDB: {e}")
         raise
+
+
+def parse_jenkins_payload(data):
+    """
+    Parse the compact JSON our Jenkins shared-library step (pushBuildMetric) posts to /jenkins.
+
+    Expected keys (all optional except status; sensible defaults applied):
+        job (pipeline id), component, job_name (display), number (build number/version),
+        status (SUCCESS/FAILURE/UNSTABLE/ABORTED), duration_seconds (float),
+        branch, template_name, build_url
+    """
+    try:
+        status = data.get('status', 'UNKNOWN')
+        duration = data.get('duration_seconds')
+        parsed = {
+            'build_type_id': escape_label_value(data.get('job') or 'unknown'),
+            'build_type_component': escape_label_value(data.get('component') or 'unknown'),
+            'build_type_name': escape_label_value(data.get('job_name') or data.get('job') or 'unknown'),
+            'branch': escape_label_value(data.get('branch') or 'unknown'),
+            'template_name': escape_label_value(data.get('template_name') or 'empty'),
+            'version': escape_label_value(data.get('number', '')),
+            'build_url': escape_label_value(data.get('build_url', '')),
+            'build_id': escape_label_value(data.get('number', '')),
+            'status': status,
+            'status_value': 1 if status == 'SUCCESS' else 0,
+            'duration_seconds': float(duration) if duration is not None else None,
+        }
+        logger.info(f"Parsed Jenkins payload: {parsed}")
+        return parsed
+    except Exception as e:
+        logger.error(f"Failed Jenkins payload parsing: {str(e)}")
+        raise
+
+
+def build_jenkins_line_protocol(parsed_data: dict) -> str:
+    """
+    Build an InfluxDB line for a Jenkins build.
+
+    Written to its own bucket (INFLUXDB_JENKINS_BUCKET), measurement `jenkins_build_status`,
+    using the SAME tag/field names as teamcity_build_status so dashboards can union the two.
+    """
+    measurement = "jenkins_build_status"
+
+    tags = ",".join([
+        f"build_type_id={escape_tag(parsed_data['build_type_id'])}",
+        f"build_type_component={escape_tag(parsed_data['build_type_component'])}",
+        f"build_type_name={escape_tag(parsed_data['build_type_name'])}",
+        f"branch={escape_tag(parsed_data['branch'])}",
+        f"template_name={escape_tag(parsed_data['template_name'])}",
+    ])
+
+    field_parts = [
+        f"status_value={parsed_data['status_value']}i",
+        f'status="{parsed_data["status"]}"',
+        f'version="{escape_tag(parsed_data["version"])}"',
+        f'build_url="{parsed_data["build_url"]}"',
+        f'build_id="{parsed_data["build_id"]}"',
+    ]
+    if parsed_data.get('duration_seconds') is not None:
+        field_parts.append(f"duration_seconds={float(parsed_data['duration_seconds'])}")
+    fields = ",".join(field_parts)
+
+    timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
+
+    return f"{measurement},{tags} {fields} {timestamp_ns}"
 
 
 @app.route('/webhook', defaults={'template_name': None}, methods=['POST'])
@@ -319,8 +390,36 @@ def teamcity_webhook(template_name=None):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route('/jenkins', methods=['POST'])
+def jenkins_webhook():
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"status": "error", "message": "No JSON data received"}), 400
+
+        parsed_data = parse_jenkins_payload(data)
+        line = build_jenkins_line_protocol(parsed_data)
+
+        response = send_to_influxdb(line, bucket=INFLUXDB_JENKINS_BUCKET)
+        response.raise_for_status()
+
+        return jsonify({
+            "status": "success",
+            "message": "Metric written to InfluxDB",
+            "bucket":          INFLUXDB_JENKINS_BUCKET,
+            "build_type":      parsed_data['build_type_name'],
+            "version":         parsed_data['version'],
+            "build_status":    parsed_data['status'],
+            "influxdb_response": response.status_code,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Failed Jenkins webhook processing: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 if __name__ == '__main__':
     logger.info("Run TeamCity Webhook → InfluxDB")
     logger.info(f"Listening on port: {PORT}")
-    logger.info(f"InfluxDB URL: {INFLUXDB_URL} / org: {INFLUXDB_ORG} / bucket: {INFLUXDB_BUCKET}")
+    logger.info(f"InfluxDB URL: {INFLUXDB_URL} / org: {INFLUXDB_ORG} / bucket: {INFLUXDB_BUCKET} / jenkins bucket: {INFLUXDB_JENKINS_BUCKET}")
     app.run(host='0.0.0.0', port=PORT, debug=False)

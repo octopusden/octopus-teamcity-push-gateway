@@ -11,6 +11,14 @@ The service listens for incoming HTTP POST requests from TeamCity, parses build 
 - **Build duration**: the TeamCity path now writes a `duration_seconds` field
   (`finishDate - startDate`) to `teamcity_build_status`. Parsed via `parse_tc_date` /
   `compute_duration_seconds`; omitted for canceled/never-started builds (no start/finish pair).
+- **Jenkins endpoint (separate bucket)**: new `POST /jenkins` accepts a compact build JSON
+  from Jenkins pipelines and writes to measurement `jenkins_build_status` in its OWN bucket
+  `INFLUXDB_JENKINS_BUCKET` (default `jenkins`), same tag/field names as
+  `teamcity_build_status`. Jenkins builds POST here from the shared-library step
+  `pushBuildMetric` (plain curl) in `post { always { ... } }`. `template_name` does not apply
+  to Jenkins (rows carry `template_name="empty"`; standard-vs-custom split is the bucket /
+  measurement). **The `jenkins` bucket must be created in InfluxDB and be writable by
+  `INFLUXDB_TOKEN`** — buckets are not auto-created (unlike measurements).
 
 ## Installation
 
@@ -165,6 +173,35 @@ teamcity.internal.webhooks.enable=True
 teamcity.internal.webhooks.events=BUILD_FINISHED
 teamcity.internal.webhooks.url=http://your-server:8000/webhook/production
 ```
+
+#### POST /jenkins
+
+Endpoint for Jenkins builds. Writes to measurement `jenkins_build_status` in the separate
+bucket `INFLUXDB_JENKINS_BUCKET` (default `jenkins`), with the same tag/field names as
+`teamcity_build_status`. Posted from a Jenkins pipeline `post { always { ... } }` step
+(`pushBuildMetric`).
+
+```bash
+curl -i -X POST http://<host>/jenkins \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job": "Releng/custom-comp/Release",
+    "component": "custom-comp",
+    "job_name": "Release",
+    "number": "1.2.3",
+    "status": "SUCCESS",
+    "duration_seconds": 142.0,
+    "branch": "master"
+  }'
+```
+
+Field mapping: `job`→`build_type_id`, `component`→`build_type_component`,
+`job_name`→`build_type_name`, `number`→`version`+`build_id`, `status`→`status` (+`status_value`),
+`duration_seconds` (float, omitted if absent), `branch`→`branch`. Missing keys default to
+`unknown`/`empty`. **Requires the `jenkins` bucket to exist and be writable by the token.**
+
+Relevant env vars: `INFLUXDB_URL`, `INFLUXDB_TOKEN`, `INFLUXDB_ORG`, `INFLUXDB_BUCKET`
+(TeamCity, default `teamcity`), `INFLUXDB_JENKINS_BUCKET` (Jenkins, default `jenkins`).
 
 ## Metric
 
