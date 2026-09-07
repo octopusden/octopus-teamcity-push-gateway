@@ -174,35 +174,6 @@ teamcity.internal.webhooks.events=BUILD_FINISHED
 teamcity.internal.webhooks.url=http://your-server:8000/webhook/production
 ```
 
-#### POST /jenkins
-
-Endpoint for Jenkins builds. Writes to measurement `jenkins_build_status` in the separate
-bucket `INFLUXDB_JENKINS_BUCKET` (default `jenkins`), with the same tag/field names as
-`teamcity_build_status`. Posted from a Jenkins pipeline `post { always { ... } }` step
-(`pushBuildMetric`).
-
-```bash
-curl -i -X POST http://<host>/jenkins \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job": "Releng/custom-comp/Release",
-    "component": "custom-comp",
-    "job_name": "Release",
-    "number": "1.2.3",
-    "status": "SUCCESS",
-    "duration_seconds": 142.0,
-    "branch": "master"
-  }'
-```
-
-Field mapping: `job`→`build_type_id`, `component`→`build_type_component`,
-`job_name`→`build_type_name`, `number`→`version`+`build_id`, `status`→`status` (+`status_value`),
-`duration_seconds` (float, omitted if absent), `branch`→`branch`. Missing keys default to
-`unknown`/`empty`. **Requires the `jenkins` bucket to exist and be writable by the token.**
-
-Relevant env vars: `INFLUXDB_URL`, `INFLUXDB_TOKEN`, `INFLUXDB_ORG`, `INFLUXDB_BUCKET`
-(TeamCity, default `teamcity`), `INFLUXDB_JENKINS_BUCKET` (Jenkins, default `jenkins`).
-
 ## Metric
 
 ### teamcity_build_status
@@ -210,10 +181,6 @@ Relevant env vars: `INFLUXDB_URL`, `INFLUXDB_TOKEN`, `INFLUXDB_ORG`, `INFLUXDB_B
 **Type:** Gauge
 
 **Description:** TeamCity build status
-
-**Note:** as of the timing change, this measurement also carries a `duration_seconds` field
-(float) = `finishDate - startDate`, written when both timestamps are present in the webhook
-payload.
 
 **Values:**
 - `1` - Build successful (SUCCESS)
