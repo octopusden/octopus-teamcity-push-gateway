@@ -11,6 +11,14 @@ The service listens for incoming HTTP POST requests from TeamCity, parses build 
 - **Build duration**: the TeamCity path now writes a `duration_seconds` field
   (`finishDate - startDate`) to `teamcity_build_status`. Parsed via `parse_tc_date` /
   `compute_duration_seconds`; omitted for canceled/never-started builds (no start/finish pair).
+- **Jenkins endpoint (separate bucket)**: new `POST /jenkins` accepts a compact build JSON
+  from Jenkins pipelines and writes to measurement `jenkins_build_status` in its OWN bucket
+  `INFLUXDB_JENKINS_BUCKET` (default `jenkins`), same tag/field names as
+  `teamcity_build_status`. Jenkins builds POST here from the shared-library step
+  `pushBuildMetric` (plain curl) in `post { always { ... } }`. `template_name` does not apply
+  to Jenkins (rows carry `template_name="empty"`; standard-vs-custom split is the bucket /
+  measurement). **The `jenkins` bucket must be created in InfluxDB and be writable by
+  `INFLUXDB_TOKEN`** — buckets are not auto-created (unlike measurements).
 
 ## Installation
 
@@ -173,10 +181,6 @@ teamcity.internal.webhooks.url=http://your-server:8000/webhook/production
 **Type:** Gauge
 
 **Description:** TeamCity build status
-
-**Note:** as of the timing change, this measurement also carries a `duration_seconds` field
-(float) = `finishDate - startDate`, written when both timestamps are present in the webhook
-payload.
 
 **Values:**
 - `1` - Build successful (SUCCESS)
