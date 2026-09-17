@@ -304,7 +304,9 @@ def normalize_jenkins_instance(url):
     '.cdt.spb.openwaygroup.com' domain.
     e.g. 'https://jenkins-qa-oci.cdt.spb.openwaygroup.com/' -> 'jenkins-qa-oci'
     """
-    s = (url or '').strip()
+    if not isinstance(url, str):
+        return ''
+    s = url.strip()
     s = re.sub(r'^https?://', '', s)                       # strip scheme
     s = s.rstrip('/')                                      # strip trailing slash
     s = re.sub(r'\.cdt\.spb\.openwaygroup\.com$', '', s)   # strip domain suffix
@@ -324,6 +326,11 @@ def parse_jenkins_payload(data):
     try:
         status = data.get('status', 'UNKNOWN')
         duration = data.get('duration_seconds')
+        raw_start = data.get('start_time')
+        try:
+            start_time = int(raw_start) if raw_start is not None else None
+        except (TypeError, ValueError):
+            start_time = None  # optional field: drop a malformed value, keep the metric
         parsed = {
             'build_type_id': escape_label_value(data.get('job') or 'unknown'),
             'build_type_component': escape_label_value(data.get('component') or 'unknown'),
@@ -337,7 +344,7 @@ def parse_jenkins_payload(data):
             'status': status,
             'status_value': 1 if status == 'SUCCESS' else 0,
             'duration_seconds': float(duration) if duration is not None else None,
-            'start_time': data.get('start_time'),
+            'start_time': start_time,
         }
         logger.info(f"Parsed Jenkins payload: {parsed}")
         return parsed
