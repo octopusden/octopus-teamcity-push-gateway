@@ -8,6 +8,7 @@ import structlog
 from oc_logging import setup_json_logging, setup_text_logging
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 
@@ -296,6 +297,20 @@ def send_to_influxdb(line: str, bucket: str = None) -> requests.Response:
         raise
 
 
+def normalize_jenkins_instance(url):
+    """
+    Turn a full Jenkins controller URL into a short instance name:
+    strip the leading http(s)://, any trailing slash, and the trailing
+    '.cdt.spb.openwaygroup.com' domain.
+    e.g. 'https://jenkins-qa-oci.cdt.spb.openwaygroup.com/' -> 'jenkins-qa-oci'
+    """
+    s = (url or '').strip()
+    s = re.sub(r'^https?://', '', s)                       # strip scheme
+    s = s.rstrip('/')                                      # strip trailing slash
+    s = re.sub(r'\.cdt\.spb\.openwaygroup\.com$', '', s)   # strip domain suffix
+    return s
+
+
 def parse_jenkins_payload(data):
     """
     Parse the compact JSON our Jenkins shared-library step (pushBuildMetric) posts to /jenkins.
@@ -303,7 +318,8 @@ def parse_jenkins_payload(data):
     Expected keys (all optional except status; sensible defaults applied):
         job (pipeline id), component, job_name (display), number (build number/version),
         status (SUCCESS/FAILURE/UNSTABLE/ABORTED), duration_seconds (float),
-        branch, template_name, build_url
+        branch, template_name, build_url, jenkins_url (stored normalized as
+        jenkins_instance), start_time (epoch millis)
     """
     try:
         status = data.get('status', 'UNKNOWN')
@@ -316,10 +332,12 @@ def parse_jenkins_payload(data):
             'template_name': escape_label_value(data.get('template_name') or 'empty'),
             'version': escape_label_value(data.get('number', '')),
             'build_url': escape_label_value(data.get('build_url', '')),
+            'jenkins_instance': escape_label_value(normalize_jenkins_instance(data.get('jenkins_url', ''))),
             'build_id': escape_label_value(data.get('number', '')),
             'status': status,
             'status_value': 1 if status == 'SUCCESS' else 0,
             'duration_seconds': float(duration) if duration is not None else None,
+            'start_time': data.get('start_time'),
         }
         logger.info(f"Parsed Jenkins payload: {parsed}")
         return parsed
@@ -350,10 +368,13 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
         f'status="{parsed_data["status"]}"',
         f'version="{escape_tag(parsed_data["version"])}"',
         f'build_url="{parsed_data["build_url"]}"',
+        f'jenkins_instance="{parsed_data["jenkins_instance"]}"',
         f'build_id="{parsed_data["build_id"]}"',
     ]
     if parsed_data.get('duration_seconds') is not None:
         field_parts.append(f"duration_seconds={float(parsed_data['duration_seconds'])}")
+    if parsed_data.get('start_time') is not None:
+        field_parts.append(f"start_time={int(parsed_data['start_time'])}i")
     fields = ",".join(field_parts)
 
     timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
