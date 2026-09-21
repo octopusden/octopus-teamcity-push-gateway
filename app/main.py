@@ -8,6 +8,7 @@ import structlog
 from oc_logging import setup_json_logging, setup_text_logging
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 
@@ -118,6 +119,9 @@ INFLUXDB_ORG           = os.getenv('INFLUXDB_ORG', 'my-org')
 INFLUXDB_BUCKET        = os.getenv('INFLUXDB_BUCKET', 'teamcity')
 # Jenkins builds go to their own bucket (must exist and be writable by INFLUXDB_TOKEN).
 INFLUXDB_JENKINS_BUCKET = os.getenv('INFLUXDB_JENKINS_BUCKET', 'jenkins')
+# Host suffix stripped from the Jenkins instance name (e.g. ".internal.example.com");
+# empty keeps the full host. Set it per deployment.
+JENKINS_HOST_SUFFIX    = os.getenv('JENKINS_HOST_SUFFIX', '')
 PORT                   = int(os.getenv('PORT', '8000'))
 
 
@@ -296,6 +300,23 @@ def send_to_influxdb(line: str, bucket: str = None) -> requests.Response:
         raise
 
 
+def normalize_jenkins_instance(url):
+    """
+    Turn a full Jenkins controller URL into a short instance name: strip the
+    leading http(s)://, any trailing slash, and the configured host suffix
+    (JENKINS_HOST_SUFFIX). e.g. with suffix '.internal.example.com':
+    'https://jenkins-qa-oci.internal.example.com/' -> 'jenkins-qa-oci'
+    """
+    if not isinstance(url, str):
+        return ''
+    s = url.strip()
+    s = re.sub(r'^https?://', '', s)                       # strip scheme
+    s = s.rstrip('/')                                      # strip trailing slash
+    if JENKINS_HOST_SUFFIX and s.endswith(JENKINS_HOST_SUFFIX):
+        s = s[:-len(JENKINS_HOST_SUFFIX)]                  # strip configured host suffix
+    return s
+
+
 def parse_jenkins_payload(data):
     """
     Parse the compact JSON our Jenkins shared-library step (pushBuildMetric) posts to /jenkins.
@@ -303,11 +324,17 @@ def parse_jenkins_payload(data):
     Expected keys (all optional except status; sensible defaults applied):
         job (pipeline id), component, job_name (display), number (build number/version),
         status (SUCCESS/FAILURE/UNSTABLE/ABORTED), duration_seconds (float),
-        branch, template_name, build_url
+        branch, template_name, build_url, jenkins_url (stored normalized as
+        jenkins_instance), start_time (epoch millis)
     """
     try:
         status = data.get('status', 'UNKNOWN')
         duration = data.get('duration_seconds')
+        raw_start = data.get('start_time')
+        try:
+            start_time = int(raw_start) if raw_start is not None else None
+        except (TypeError, ValueError):
+            start_time = None  # optional field: drop a malformed value, keep the metric
         parsed = {
             'build_type_id': escape_label_value(data.get('job') or 'unknown'),
             'build_type_component': escape_label_value(data.get('component') or 'unknown'),
@@ -316,10 +343,12 @@ def parse_jenkins_payload(data):
             'template_name': escape_label_value(data.get('template_name') or 'empty'),
             'version': escape_label_value(data.get('number', '')),
             'build_url': escape_label_value(data.get('build_url', '')),
+            'jenkins_instance': escape_label_value(normalize_jenkins_instance(data.get('jenkins_url', ''))),
             'build_id': escape_label_value(data.get('number', '')),
             'status': status,
             'status_value': 1 if status == 'SUCCESS' else 0,
             'duration_seconds': float(duration) if duration is not None else None,
+            'start_time': start_time,
         }
         logger.info(f"Parsed Jenkins payload: {parsed}")
         return parsed
@@ -350,10 +379,13 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
         f'status="{parsed_data["status"]}"',
         f'version="{escape_tag(parsed_data["version"])}"',
         f'build_url="{parsed_data["build_url"]}"',
+        f'jenkins_instance="{parsed_data["jenkins_instance"]}"',
         f'build_id="{parsed_data["build_id"]}"',
     ]
     if parsed_data.get('duration_seconds') is not None:
         field_parts.append(f"duration_seconds={float(parsed_data['duration_seconds'])}")
+    if parsed_data.get('start_time') is not None:
+        field_parts.append(f"start_time={int(parsed_data['start_time'])}i")
     fields = ",".join(field_parts)
 
     timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
