@@ -21,13 +21,6 @@ The service listens for incoming HTTP POST requests from TeamCity, parses build 
   `INFLUXDB_TOKEN`** — buckets are not auto-created (unlike measurements).
 - **Component name tag**: `teamcity_build_status` carries a `metric_component_name` tag taken
   from the TeamCity build parameter `COMPONENT_NAME` (`unknown` if not set).
-- **Components Registry snapshot**: `scripts/components_registry_to_influx.py` is a standalone
-  script (not part of the webhook service). It reads all components from the registry v4 API
-  (`GET /rest/api/4/components`) and writes one point per component to measurement
-  `components_registry` (tags `component_name`, `archived`, `has_teamcity`,
-  `teamcity_project_id`, `build_system`, `product_type`, `jira_project_key`; fields
-  `display_name`, `owner`, `vcs_path`, …). Join with builds on
-  `component_name` = `metric_component_name`. Run it on demand / on a schedule:
 
   ```bash
   COMPONENTS_REGISTRY_URL=https://<gateway>/components-registry-service \
