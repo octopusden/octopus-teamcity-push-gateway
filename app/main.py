@@ -191,6 +191,9 @@ def parse_teamcity_payload(data):
         template_name = escape_label_value(
             get_property(properties, 'MONITORING_TEMPLATE_ID', default='empty')
         )
+        metric_component_name = escape_label_value(
+            get_property(properties, 'COMPONENT_NAME') or 'unknown'
+        )
         status_value = 1 if status == 'SUCCESS' else 0
         duration_seconds = compute_duration_seconds(payload)
 
@@ -202,6 +205,7 @@ def parse_teamcity_payload(data):
             'build_url': escape_label_value(build_url),
             'current_build_url': escape_label_value(current_build_url),
             'build_type_component': escape_label_value(build_type_component),
+            'metric_component_name': metric_component_name,
             'status': status,
             'status_value': status_value,
             'build_id': escape_label_value(build_id),
@@ -230,7 +234,9 @@ def build_line_protocol(parsed_data: dict) -> str:
     Build an InfluxDB line protocol string from parsed TeamCity data.
 
     Tags (indexed, used in filters):
-        build_type_id, build_type_component, build_type_name, branch, template_name
+        build_type_id, build_type_component, build_type_name, branch, template_name,
+        project_id, default_branch, metric_component_name (build parameter COMPONENT_NAME,
+        "unknown" if not set)
 
     Fields (numeric/string values):
         status_value (int), status (string), version (string),
@@ -247,6 +253,7 @@ def build_line_protocol(parsed_data: dict) -> str:
         f"template_name={escape_tag(parsed_data['template_name'])}",
         f"project_id={escape_tag(parsed_data['project_id'])}",
         f"default_branch={escape_tag(parsed_data['default_branch'])}",
+        f"metric_component_name={escape_tag(parsed_data['metric_component_name'])}",
     ])
 
     field_parts = [

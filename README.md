@@ -19,6 +19,8 @@ The service listens for incoming HTTP POST requests from TeamCity, parses build 
   to Jenkins (rows carry `template_name="empty"`; standard-vs-custom split is the bucket /
   measurement). **The `jenkins` bucket must be created in InfluxDB and be writable by
   `INFLUXDB_TOKEN`** — buckets are not auto-created (unlike measurements).
+- **Component name tag**: `teamcity_build_status` carries a `metric_component_name` tag taken
+  from the TeamCity build parameter `COMPONENT_NAME` (`unknown` if not set).
 
 ## Installation
 
@@ -194,6 +196,7 @@ The metric contains the following labels:
 |-------|-------------|---------------|
 | `build_type_id` | Unique identifier of build configuration in TeamCity | `Project_BuildConfig` |
 | `build_type_component` | Project component name (last element from projectName) | `Project` |
+| `metric_component_name` | Component name from the TeamCity build parameter `COMPONENT_NAME`; `unknown` if not set | `test-component-external` |
 | `build_type_name` | Human-readable build configuration name | `Build Configuration` |
 | `version` | Build version (build number) | `1.0.0` |
 | `branch` | Branch from which build was triggered | `master` |
