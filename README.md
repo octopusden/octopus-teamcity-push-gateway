@@ -22,12 +22,6 @@ The service listens for incoming HTTP POST requests from TeamCity, parses build 
 - **Component name tag**: `teamcity_build_status` carries a `metric_component_name` tag taken
   from the TeamCity build parameter `COMPONENT_NAME` (`unknown` if not set).
 
-  ```bash
-  COMPONENTS_REGISTRY_URL=https://<gateway>/components-registry-service \
-  INFLUXDB_URL=... INFLUXDB_TOKEN=... INFLUXDB_ORG=... INFLUXDB_REGISTRY_BUCKET=metrics \
-  python scripts/components_registry_to_influx.py            # add --dry-run to only print
-  ```
-
 ## Installation
 
 ### Dependencies
