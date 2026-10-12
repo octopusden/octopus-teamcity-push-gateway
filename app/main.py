@@ -333,6 +333,12 @@ def parse_jenkins_payload(data):
         status (SUCCESS/FAILURE/UNSTABLE/ABORTED), duration_seconds (float),
         branch, template_name, build_url, jenkins_url (stored normalized as
         jenkins_instance), start_time (epoch millis)
+
+    DORA deploy-event keys (sent only by the deploy pipelines, see pushBuildMetric):
+        environment (production/staging -> tag, default 'unknown'),
+        dry_run (bool -> tag 'true'/'false'/'unknown'; true = Ansible check-mode, not a real deploy),
+        image_tag (deployed tag -> field, omitted when empty),
+        git_commit (deployed commit sha -> field, omitted when empty)
     """
     try:
         status = data.get('status', 'UNKNOWN')
@@ -342,15 +348,32 @@ def parse_jenkins_payload(data):
             start_time = int(raw_start) if raw_start is not None else None
         except (TypeError, ValueError):
             start_time = None  # optional field: drop a malformed value, keep the metric
+
+        # dry_run is a low-cardinality filter dimension -> stored as a tag. Non-deploy pipelines
+        # do not send it, so absent -> 'unknown' (which never matches the real-deploy filter).
+        raw_dry_run = data.get('dry_run')
+        if isinstance(raw_dry_run, bool):
+            dry_run = 'true' if raw_dry_run else 'false'
+        elif raw_dry_run is None:
+            dry_run = 'unknown'
+        else:
+            dry_run = str(raw_dry_run).strip().lower()
+            if dry_run not in ('true', 'false'):
+                dry_run = 'unknown'
+
         parsed = {
             'build_type_id': escape_label_value(data.get('job') or 'unknown'),
             'build_type_component': escape_label_value(data.get('component') or 'unknown'),
             'build_type_name': escape_label_value(data.get('job_name') or data.get('job') or 'unknown'),
             'branch': escape_label_value(data.get('branch') or 'unknown'),
             'template_name': escape_label_value(data.get('template_name') or 'empty'),
+            'environment': escape_label_value(data.get('environment') or 'unknown'),
+            'dry_run': dry_run,
             'version': escape_label_value(data.get('number', '')),
             'build_url': escape_label_value(data.get('build_url', '')),
             'jenkins_instance': escape_label_value(normalize_jenkins_instance(data.get('jenkins_url', ''))),
+            'image_tag': escape_label_value(data.get('image_tag', '')),
+            'git_commit': escape_label_value(data.get('git_commit', '')),
             'build_id': escape_label_value(data.get('number', '')),
             'status': status,
             'status_value': 1 if status == 'SUCCESS' else 0,
@@ -370,6 +393,10 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
 
     Written to its own bucket (INFLUXDB_JENKINS_BUCKET), measurement `jenkins_build_status`,
     using the SAME tag/field names as teamcity_build_status so dashboards can union the two.
+
+    DORA deploy fields: environment and dry_run are tags (a real prod deploy filters to
+    environment=production AND dry_run=false, cheap without a pivot); image_tag and git_commit
+    are string fields, written only when non-empty (non-deploy pipelines omit them).
     """
     measurement = "jenkins_build_status"
 
@@ -379,6 +406,8 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
         f"build_type_name={escape_tag(parsed_data['build_type_name'])}",
         f"branch={escape_tag(parsed_data['branch'])}",
         f"template_name={escape_tag(parsed_data['template_name'])}",
+        f"environment={escape_tag(parsed_data['environment'])}",
+        f"dry_run={escape_tag(parsed_data['dry_run'])}",
     ])
 
     field_parts = [
@@ -389,6 +418,10 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
         f'jenkins_instance="{parsed_data["jenkins_instance"]}"',
         f'build_id="{parsed_data["build_id"]}"',
     ]
+    if parsed_data.get('image_tag'):
+        field_parts.append(f'image_tag="{parsed_data["image_tag"]}"')
+    if parsed_data.get('git_commit'):
+        field_parts.append(f'git_commit="{parsed_data["git_commit"]}"')
     if parsed_data.get('duration_seconds') is not None:
         field_parts.append(f"duration_seconds={float(parsed_data['duration_seconds'])}")
     if parsed_data.get('start_time') is not None:
