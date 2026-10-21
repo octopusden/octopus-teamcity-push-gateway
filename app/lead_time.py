@@ -49,6 +49,20 @@ BITBUCKET_VERIFY_SSL = os.getenv("BITBUCKET_VERIFY_SSL", "true").strip().lower()
 # Target measurement (written to the Jenkins bucket by the caller's writer).
 LEAD_TIME_MEASUREMENT = os.getenv("LEAD_TIME_MEASUREMENT", "deploy_lead_time")
 
+# Which deploy this instance counts, so a prod gateway and a staging gateway can run the
+# same code against different branches/environments:
+#   LEAD_TIME_DEPLOY_BRANCH  - the branch a deploy targets (prod: master, staging: staging).
+#   LEAD_TIME_ANCHOR_BRANCH  - the integration branch tasks first merge into; the "committed"
+#                              anchor is the merge into THIS branch (default staging).
+#   LEAD_TIME_ENVIRONMENT    - the environment value this instance's deploys carry; it is both
+#                              the trigger (only these deploys enrich) and the tag written.
+# When deploy-branch == anchor-branch (staging gateway) each deploy PR IS the task unit (one
+# level). When they differ (prod: master wraps the staging merges) the enricher descends into
+# the deploy PR's commits for the nested per-task merges (two levels).
+LEAD_TIME_DEPLOY_BRANCH = os.getenv("LEAD_TIME_DEPLOY_BRANCH", "master")
+LEAD_TIME_ANCHOR_BRANCH = os.getenv("LEAD_TIME_ANCHOR_BRANCH", "staging")
+LEAD_TIME_ENVIRONMENT   = os.getenv("LEAD_TIME_ENVIRONMENT", "production")
+
 # component (DORA label) -> Bitbucket repo slug. No defaults - supply the whole map via
 # LEAD_TIME_COMPONENT_REPOS, a JSON object, e.g.
 #   {"component1": "repo1", "component2": "repo2"}
@@ -70,6 +84,9 @@ def _load_component_repos():
 COMPONENT_REPOS = _load_component_repos()
 
 _PR_MSG_RE = re.compile(r"Pull request #(\d+):")
+# Issue-key pattern pulled from the PR/commit message (e.g. "CD-5946"). Override with
+# LEAD_TIME_ISSUE_PATTERN; default = 2+ uppercase letters, a dash, digits (ignores "Feature/").
+_ISSUE_RE = re.compile(os.getenv("LEAD_TIME_ISSUE_PATTERN", r"[A-Z]{2,}-\d+"))
 
 
 # --- Bitbucket REST ----------------------------------------------------------
@@ -87,19 +104,35 @@ def _bb_get(path, params=None):
     return resp.json()
 
 
-def _staging_master_prs(repo, cur_sha):
-    """currSHA IS the staging->master squash commit -> the PR(s) that introduced it."""
+def _deploy_prs(repo, cur_sha):
+    """currSHA is the deploy-branch squash commit -> the PR(s) that introduced it, keeping
+    only those whose target is LEAD_TIME_DEPLOY_BRANCH. Returns the full PR objects."""
     data = _bb_get(f"projects/{BITBUCKET_PROJECT}/repos/{repo}/commits/{cur_sha}/pull-requests")
-    return [pr["id"] for pr in data.get("values", [])
-            if pr.get("toRef", {}).get("displayId") == "master"]
+    return [pr for pr in data.get("values", [])
+            if pr.get("toRef", {}).get("displayId") == LEAD_TIME_DEPLOY_BRANCH]
+
+
+def _pr_as_task(pr):
+    """One-level case (deploy branch == anchor branch): the deploy PR itself is the task unit.
+    Its closedDate is the merge-into-anchor time; the Jira key comes from its title."""
+    title = pr.get("title") or ""
+    issue = _ISSUE_RE.search(title)
+    return {
+        "pr_id":     str(pr.get("id")),
+        "merge_ms":  pr.get("closedDate"),
+        "sha":       (pr.get("fromRef", {}).get("latestCommit") or "")[:11],
+        "title":     title,
+        "issue_key": issue.group(0) if issue else "",
+    }
 
 
 def _task_merges(repo, pr_id):
     """Tasks carried by a staging->master PR.
 
-    Returns a list of dicts {pr_id, merge_ms, sha, title}. Filters the PR's commits
-    to the per-task squash commits ("Pull request #N:"); each such commit's
-    committerTimestamp == that task's merge-into-staging time.
+    Returns a list of dicts {pr_id, merge_ms, sha, title, issue_key}. Filters the PR's
+    commits to the per-task squash commits ("Pull request #N:"); each such commit's
+    committerTimestamp == that task's merge-into-staging time. issue_key is the Jira key
+    parsed from the message (e.g. "CD-5946"), or "" when none is found.
     """
     out, start = [], 0
     while True:
@@ -112,11 +145,13 @@ def _task_merges(repo, pr_id):
             first = msg.splitlines()[0] if msg else ""
             m = _PR_MSG_RE.match(first)
             if m and m.group(1) != str(pr_id):      # skip the outer staging->master PR itself
+                issue = _ISSUE_RE.search(first)
                 out.append({
-                    "pr_id":    m.group(1),
-                    "merge_ms": c.get("committerTimestamp"),
-                    "sha":      c.get("displayId") or (c.get("id", "") or "")[:11],
-                    "title":    first,
+                    "pr_id":     m.group(1),
+                    "merge_ms":  c.get("committerTimestamp"),
+                    "sha":       c.get("displayId") or (c.get("id", "") or "")[:11],
+                    "title":     first,
+                    "issue_key": issue.group(0) if issue else "",
                 })
         if data.get("isLastPage", True):
             break
@@ -134,19 +169,19 @@ def _esc_str(value):
     return str(value).replace('\\', '\\\\').replace('"', '\\"')
 
 
-def _build_line(component, pr_id, sha, merge_ms, deploy_ms, lead_s, ts_ns):
+def _build_line(component, pr_id, sha, merge_ms, deploy_ms, lead_s, ts_ns, issue_key=""):
     """One deploy_lead_time point.
 
     ts_ns carries a per-task offset: every task of a deploy shares the same tagset
     (component/environment/dry_run) and the same deploy instant, and in InfluxDB
     measurement+tagset+timestamp is the point identity, so without the offset the
-    rows would overwrite each other. pr_id is a FIELD (not a tag) to avoid unbounded
-    series cardinality.
+    rows would overwrite each other. pr_id and issue_key are FIELDS (not tags) to
+    avoid unbounded series cardinality.
     """
     tags = (
         f"{LEAD_TIME_MEASUREMENT}"
         f",build_type_component={_esc_tag(component)}"
-        f",environment=production,dry_run=false"
+        f",environment={_esc_tag(LEAD_TIME_ENVIRONMENT)},dry_run=false"
     )
     fields = (
         f"lead_seconds={lead_s:.3f}"
@@ -154,26 +189,31 @@ def _build_line(component, pr_id, sha, merge_ms, deploy_ms, lead_s, ts_ns):
         f",deploy_time={int(deploy_ms)}i"
         f',pr_id="{_esc_str(pr_id)}"'
         f',commit_sha="{_esc_str(sha)}"'
+        f',issue_key="{_esc_str(issue_key)}"'
     )
     return f"{tags} {fields} {ts_ns}"
 
 
 def compute_lead_lines(component, cur_sha, deploy_ms):
-    """Pure compute: returns the deploy_lead_time line-protocol rows for one prod deploy."""
+    """Pure compute: returns the deploy_lead_time line-protocol rows for one deploy."""
     repo = COMPONENT_REPOS.get(component)
     if not repo:
         logger.warning(f"lead_time: no repo mapping for component '{component}', skipping")
         return []
 
     deploy_ms = int(deploy_ms)
-    prs = _staging_master_prs(repo, cur_sha)
+    prs = _deploy_prs(repo, cur_sha)
     if not prs:
-        logger.warning(f"lead_time: no staging->master PR for {cur_sha} ({repo})")
+        logger.warning(f"lead_time: no {LEAD_TIME_DEPLOY_BRANCH} PR for {cur_sha} ({repo})")
         return []
 
+    one_level = LEAD_TIME_DEPLOY_BRANCH == LEAD_TIME_ANCHOR_BRANCH
     lines, i = [], 0
     for pr in prs:
-        for task in _task_merges(repo, pr):
+        # one level (staging gateway): the deploy PR itself is the task; two levels (prod):
+        # descend into the deploy PR's commits for the nested per-task merges into the anchor.
+        tasks = [_pr_as_task(pr)] if one_level else _task_merges(repo, pr["id"])
+        for task in tasks:
             merge_ms = task["merge_ms"]
             if not merge_ms:
                 continue
@@ -185,15 +225,17 @@ def compute_lead_lines(component, cur_sha, deploy_ms):
             ts_ns = deploy_ms * 1_000_000 + i            # per-task offset -> unique point
             i += 1
             lines.append(_build_line(component, task["pr_id"], task["sha"],
-                                     merge_ms, deploy_ms, lead_s, ts_ns))
+                                     merge_ms, deploy_ms, lead_s, ts_ns,
+                                     issue_key=task.get("issue_key", "")))
     return lines
 
 
 # --- orchestration -----------------------------------------------------------
 
-def is_real_prod_deploy(parsed):
-    """A row is a real prod deploy when environment=production AND dry_run=false AND SUCCESS."""
-    return (parsed.get("environment") == "production"
+def is_countable_deploy(parsed):
+    """A row is a countable deploy when its environment matches LEAD_TIME_ENVIRONMENT (production
+    by default, staging on a staging gateway) AND dry_run=false AND SUCCESS."""
+    return (parsed.get("environment") == LEAD_TIME_ENVIRONMENT
             and str(parsed.get("dry_run")) == "false"
             and parsed.get("status") == "SUCCESS")
 
@@ -220,7 +262,7 @@ def maybe_enrich_lead_time(parsed, writer):
     """
     if not LEAD_TIME_ENABLED:
         return
-    if not is_real_prod_deploy(parsed):
+    if not is_countable_deploy(parsed):
         return
     if not (BITBUCKET_URL and BITBUCKET_TOKEN and BITBUCKET_PROJECT):
         logger.warning("lead_time: enabled but BITBUCKET_URL/TOKEN/PROJECT not fully set, skipping")

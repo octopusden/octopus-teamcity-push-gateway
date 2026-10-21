@@ -70,6 +70,14 @@ no built-in defaults for the connection or the component→repo map).
 | `BITBUCKET_VERIFY_SSL` | TLS verification (`false` to disable) | `true` | No |
 | `LEAD_TIME_COMPONENT_REPOS` | JSON map: DORA component label → Bitbucket repo slug | `` (empty) | Yes (when enabled) |
 | `LEAD_TIME_MEASUREMENT` | InfluxDB measurement for lead-time points | `deploy_lead_time` | No |
+| `LEAD_TIME_ISSUE_PATTERN` | Regex for the issue key parsed from the PR title (stored as the `issue_key` field) | `[A-Z]{2,}-\d+` | No |
+| `LEAD_TIME_DEPLOY_BRANCH` | Branch a deploy targets on this instance — `master` for a prod gateway, `staging` for a staging gateway | `master` | No |
+| `LEAD_TIME_ANCHOR_BRANCH` | Integration branch tasks first merge into; the "committed" anchor is the merge into this branch | `staging` | No |
+| `LEAD_TIME_ENVIRONMENT` | Environment value this instance's deploys carry — the trigger and the `environment` tag written (`production` / `staging`) | `production` | No |
+
+When `LEAD_TIME_DEPLOY_BRANCH` equals `LEAD_TIME_ANCHOR_BRANCH` (staging gateway) each deploy PR is
+itself the change unit (one level); when they differ (prod: `master` wraps the staging merges) the
+enricher descends into the deploy PR's commits for the nested per-task merges (two levels).
 
 The token is a secret — inject it via your orchestrator's secret store (never commit it).
 `LEAD_TIME_COMPONENT_REPOS` has no default; provide the full map, for example
