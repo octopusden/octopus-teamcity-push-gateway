@@ -208,7 +208,7 @@ def compute_lead_lines(component, cur_sha, deploy_ms):
         return []
 
     one_level = LEAD_TIME_DEPLOY_BRANCH == LEAD_TIME_ANCHOR_BRANCH
-    lines, i = [], 0
+    lines, fallback = [], 0
     for pr in prs:
         # one level (staging gateway): the deploy PR itself is the task; two levels (prod):
         # descend into the deploy PR's commits for the nested per-task merges into the anchor.
@@ -222,8 +222,17 @@ def compute_lead_lines(component, cur_sha, deploy_ms):
                 logger.warning(
                     f"lead_time: negative lead for PR#{task['pr_id']} ({lead_s:.0f}s), skipping")
                 continue
-            ts_ns = deploy_ms * 1_000_000 + i            # per-task offset -> unique point
-            i += 1
+            # Per-task offset within the deploy's millisecond, so the point is unique AND stable:
+            # derived from the numeric pr_id (idempotent on re-runs; two tasks never share a slot
+            # regardless of order, even if two same-ms deploys race). A non-numeric id falls back
+            # to a counter in a separate high band so it cannot clash with a real pr_id.
+            pr_id = str(task["pr_id"])
+            if pr_id.isdigit() and int(pr_id) < 900_000:
+                offset = int(pr_id)
+            else:
+                offset = 900_000 + fallback
+                fallback += 1
+            ts_ns = deploy_ms * 1_000_000 + offset
             lines.append(_build_line(component, task["pr_id"], task["sha"],
                                      merge_ms, deploy_ms, lead_s, ts_ns,
                                      issue_key=task.get("issue_key", "")))
@@ -243,11 +252,25 @@ def is_countable_deploy(parsed):
 def _run_enrichment(component, cur_sha, deploy_ms, writer):
     try:
         lines = compute_lead_lines(component, cur_sha, deploy_ms)
-        for line in lines:
-            writer(line)
-        logger.info(f"lead_time: wrote {len(lines)} deploy_lead_time rows for {component}")
-    except Exception as e:                               # never let enrichment surface to the request
+    except Exception as e:                               # BB walk / compute failed
         logger.error(f"lead_time enrichment failed for {component}/{cur_sha}: {e}")
+        return
+
+    # Write each row independently: a per-row failure must not drop the rest, and the summary
+    # must reflect what was actually persisted (writer = send_to_influxdb returns the Response
+    # and does NOT raise on a 4xx/5xx, so check the status explicitly).
+    written = 0
+    for line in lines:
+        try:
+            resp = writer(line)
+            status = getattr(resp, "status_code", None)
+            if status is not None and status >= 400:
+                logger.error(f"lead_time: influx write HTTP {status} for {component}: {line}")
+                continue
+            written += 1
+        except Exception as e:                           # network error etc. - keep going
+            logger.error(f"lead_time: influx write error for {component}/{cur_sha}: {e}")
+    logger.info(f"lead_time: wrote {written}/{len(lines)} deploy_lead_time rows for {component}")
 
 
 def maybe_enrich_lead_time(parsed, writer):
