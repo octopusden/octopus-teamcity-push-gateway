@@ -11,6 +11,8 @@ import os
 import re
 from datetime import datetime, timezone
 
+import lead_time
+
 
 def get_log_level():
     """
@@ -474,6 +476,14 @@ def jenkins_webhook():
 
         response = send_to_influxdb(line, bucket=INFLUXDB_JENKINS_BUCKET)
         response.raise_for_status()
+
+        # DORA Lead Time: for a real prod deploy, enrich asynchronously from Bitbucket and
+        # write deploy_lead_time rows. No-ops unless LEAD_TIME_ENABLED and the row is a real
+        # prod deploy; never blocks or fails this request.
+        lead_time.maybe_enrich_lead_time(
+            parsed_data,
+            lambda ln: send_to_influxdb(ln, bucket=INFLUXDB_JENKINS_BUCKET),
+        )
 
         return jsonify({
             "status": "success",

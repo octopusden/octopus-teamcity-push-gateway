@@ -21,6 +21,12 @@ The service listens for incoming HTTP POST requests from TeamCity, parses build 
   `INFLUXDB_TOKEN`** — buckets are not auto-created (unlike measurements).
 - **Component name tag**: `teamcity_build_status` carries a `metric_component_name` tag taken
   from the TeamCity build parameter `COMPONENT_NAME` (`unknown` if not set).
+- **DORA Lead Time enrichment (`app/lead_time.py`)**: when `/jenkins` persists a real prod deploy
+  row (`environment=production`, `dry_run=false`, `SUCCESS`), the gateway asynchronously walks
+  Bitbucket to find the tasks carried by that deploy and their merge-into-staging times, and writes
+  one `deploy_lead_time` point per task to the Jenkins bucket (`lead_seconds = deploy_start_time -
+  task_merge_into_staging_time`). Off by default (`LEAD_TIME_ENABLED=false`); never blocks or fails
+  the `/jenkins` request. All Bitbucket connection details are env-only (see below).
 
 ## Installation
 
@@ -44,6 +50,39 @@ All parameters are configured via environment variables:
 | `INSTANCE_NAME` | Instance name for Pushgateway | `teamcity` | No |
 | `LOG_LEVEL` | Logging level (name or number: DEBUG/10 … CRITICAL/50) | `INFO` | No |
 | `LOG_FORMAT` | Logging output format: `json` or `text` | `json` | No |
+| `INFLUXDB_URL` / `INFLUXDB_TOKEN` / `INFLUXDB_ORG` / `INFLUXDB_BUCKET` | InfluxDB v2 write target (TeamCity) | `http://localhost:8086` / `` / `my-org` / `teamcity` | — |
+| `INFLUXDB_JENKINS_BUCKET` | Bucket for Jenkins rows (`jenkins_build_status`, `deploy_lead_time`) | `jenkins` | No |
+| `JENKINS_HOST_SUFFIX` | Host suffix stripped from the Jenkins instance name | `` (empty) | No |
+
+#### DORA Lead Time enrichment
+
+All Bitbucket connection details are env-only — nothing is hard-coded in the source. Enrichment
+stays off until `LEAD_TIME_ENABLED=true` AND the required Bitbucket variables are set (there are
+no built-in defaults for the connection or the component→repo map).
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `LEAD_TIME_ENABLED` | Master switch for lead-time enrichment | `false` | No |
+| `BITBUCKET_URL` | Bitbucket base URL, e.g. `https://bitbucket.example.com` | `` (empty) | Yes (when enabled) |
+| `BITBUCKET_TOKEN` | Bitbucket HTTP access token, **read-scoped** (`Authorization: Bearer`) | `` (empty) | Yes (when enabled) |
+| `BITBUCKET_PROJECT` | Bitbucket project key  | `` (empty) | Yes (when enabled) |
+| `BITBUCKET_TIMEOUT` | Per-request timeout, seconds | `20` | No |
+| `BITBUCKET_VERIFY_SSL` | TLS verification (`false` to disable) | `true` | No |
+| `LEAD_TIME_COMPONENT_REPOS` | JSON map: DORA component label → Bitbucket repo slug | `` (empty) | Yes (when enabled) |
+| `LEAD_TIME_MEASUREMENT` | InfluxDB measurement for lead-time points | `deploy_lead_time` | No |
+| `LEAD_TIME_ISSUE_PATTERN` | Regex for the issue key parsed from the PR title (stored as the `issue_key` field) | `[A-Z]{2,}-\d+` | No |
+| `LEAD_TIME_DEPLOY_BRANCH` | Branch a deploy targets on this instance — `master` for a prod gateway, `staging` for a staging gateway | `master` | No |
+| `LEAD_TIME_ANCHOR_BRANCH` | Integration branch tasks first merge into; the "committed" anchor is the merge into this branch | `staging` | No |
+| `LEAD_TIME_ENVIRONMENT` | Environment value this instance's deploys carry — the trigger and the `environment` tag written (`production` / `staging`) | `production` | No |
+
+When `LEAD_TIME_DEPLOY_BRANCH` equals `LEAD_TIME_ANCHOR_BRANCH` (staging gateway) each deploy PR is
+itself the change unit (one level); when they differ (prod: `master` wraps the staging merges) the
+enricher descends into the deploy PR's commits for the nested per-task merges (two levels).
+
+The token is a secret — inject it via your orchestrator's secret store (never commit it).
+`LEAD_TIME_COMPONENT_REPOS` has no default; provide the full map, for example
+`{"component1": "repo1", "component2": "repo2"}`. A component absent from the map is skipped
+(logged), so enrichment writes nothing until it is set.
 
 ### Logging
 
