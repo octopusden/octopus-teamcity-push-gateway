@@ -334,7 +334,8 @@ def parse_jenkins_payload(data):
         job (pipeline id), component, job_name (display), number (build number/version),
         status (SUCCESS/FAILURE/UNSTABLE/ABORTED), duration_seconds (float),
         branch, template_name, build_url, jenkins_url (stored normalized as
-        jenkins_instance), start_time (epoch millis)
+        jenkins_instance), start_time (epoch millis), node (NODE_NAME), job_type
+        (shared-library entrypoint), client (client code derived from the job path)
 
     DORA deploy-event keys (sent only by the deploy pipelines, see pushBuildMetric):
         environment (production/staging -> tag, default 'unknown'),
@@ -373,7 +374,10 @@ def parse_jenkins_payload(data):
             'dry_run': dry_run,
             'version': escape_label_value(data.get('number', '')),
             'build_url': escape_label_value(data.get('build_url', '')),
-            'jenkins_instance': escape_label_value(normalize_jenkins_instance(data.get('jenkins_url', ''))),
+            'jenkins_instance': escape_label_value(normalize_jenkins_instance(data.get('jenkins_url', '')) or 'unknown'),
+            'node': escape_label_value(data.get('node') or 'unknown'),
+            'job_type': escape_label_value(data.get('job_type') or 'unknown'),
+            'client': escape_label_value(data.get('client') or 'unknown'),
             'image_tag': escape_label_value(data.get('image_tag', '')),
             'git_commit': escape_label_value(data.get('git_commit', '')),
             'build_id': escape_label_value(data.get('number', '')),
@@ -396,6 +400,11 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
     Written to its own bucket (INFLUXDB_JENKINS_BUCKET), measurement `jenkins_build_status`,
     using the SAME tag/field names as teamcity_build_status so dashboards can union the two.
 
+    Breakdown tags (all low-cardinality, so dashboards group/filter without a pivot):
+    jenkins_instance (controller), node (agent NODE_NAME), job_type (shared-library
+    entrypoint), client (from the job path). jenkins_instance used to be a FIELD; rows written
+    before this change carry it as a field, not a tag.
+
     DORA deploy fields: environment and dry_run are tags (a real prod deploy filters to
     environment=production AND dry_run=false, cheap without a pivot); image_tag and git_commit
     are string fields, written only when non-empty (non-deploy pipelines omit them).
@@ -410,6 +419,10 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
         f"template_name={escape_tag(parsed_data['template_name'])}",
         f"environment={escape_tag(parsed_data['environment'])}",
         f"dry_run={escape_tag(parsed_data['dry_run'])}",
+        f"jenkins_instance={escape_tag(parsed_data['jenkins_instance'])}",
+        f"node={escape_tag(parsed_data['node'])}",
+        f"job_type={escape_tag(parsed_data['job_type'])}",
+        f"client={escape_tag(parsed_data['client'])}",
     ])
 
     field_parts = [
@@ -417,7 +430,6 @@ def build_jenkins_line_protocol(parsed_data: dict) -> str:
         f'status="{parsed_data["status"]}"',
         f'version="{escape_tag(parsed_data["version"])}"',
         f'build_url="{parsed_data["build_url"]}"',
-        f'jenkins_instance="{parsed_data["jenkins_instance"]}"',
         f'build_id="{parsed_data["build_id"]}"',
     ]
     if parsed_data.get('image_tag'):
