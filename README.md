@@ -19,6 +19,11 @@ The service listens for incoming HTTP POST requests from TeamCity, parses build 
   to Jenkins (rows carry `template_name="empty"`; standard-vs-custom split is the bucket /
   measurement). **The `jenkins` bucket must be created in InfluxDB and be writable by
   `INFLUXDB_TOKEN`** — buckets are not auto-created (unlike measurements).
+- **Jenkins breakdown tags**: `jenkins_build_status` carries the tags `jenkins_instance`
+  (controller, normalized from `jenkins_url`), `node` (agent `NODE_NAME`), `job_type`
+  (shared-library entrypoint, e.g. `docker-build`, `service-mqCleanup`, `deploy`) and `client`
+  (client code derived from the job path in `pushBuildMetric`); missing values are `unknown`.
+  `jenkins_instance` was a **field** before this change — older rows still have it as a field.
 - **Component name tag**: `teamcity_build_status` carries a `metric_component_name` tag taken
   from the TeamCity build parameter `COMPONENT_NAME` (`unknown` if not set).
 - **DORA Lead Time enrichment (`app/lead_time.py`)**: when `/jenkins` persists a real prod deploy
